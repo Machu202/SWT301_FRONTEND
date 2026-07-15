@@ -255,3 +255,13 @@ td { font-size: 13px; }
 @media (max-width: 700px) {
   .address-mode-options { grid-template-columns: 1fr; }
 }
+
+.status-pair { display: flex; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
+.payment-method-group { margin-top: 14px; }
+.payment-method-options .address-mode-option { min-height: 78px; }
+.receipt-preview { display: grid; justify-items: center; gap: 14px; }
+.receipt-preview img { display: block; max-width: 100%; max-height: 68vh; object-fit: contain; border: 1px solid var(--line); border-radius: 12px; background: #f8fafc; }
+
+@media (max-width: 700px) {
+  .status-pair { justify-content: flex-start; }
+}

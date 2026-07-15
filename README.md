@@ -9,18 +9,19 @@ A backend-connected Vite frontend for the `SWT301_BACKEND-main` Spring Boot proj
 - Backend connection check
 - Customer registration
 - Customer and admin login
-- JWT session persistence
+- JWT session persistence with malformed/expired token rejection
+- Full client-state cleanup on logout or authenticated HTTP 401
 - Role-based navigation and access checks
 
 ### Customer
 
 - Browse and search products
-- Add, update, and remove cart items
+- Add and update cart items; removal requires confirmation
 - Create and update delivery addresses
 - Validate Vietnamese phone numbers
 - Check vouchers and preview backend-calculated totals
-- Checkout using COD or QR payment
-- View order history
+- Checkout using backend-provided COD or QR payment IDs shown as radio buttons
+- View order history with voucher and uploaded receipt details
 - Upload JPG or PNG QR payment receipts up to 5 MB
 
 ### Admin
@@ -28,8 +29,8 @@ A backend-connected Vite frontend for the `SWT301_BACKEND-main` Spring Boot proj
 - Create and update products using multipart form data
 - Delete products
 - View all system orders
-- Update order status using configured database IDs
-- Verify payment as `PAID`, `FAILED`, or `PENDING_VERIFICATION`
+- Update order status using the live backend status list with the current value preselected
+- Preview Customer receipts before verifying payment as `PAID`, `FAILED`, or `PENDING_VERIFICATION`
 
 ### Software-testing support
 
@@ -97,18 +98,15 @@ VITE_API_BASE_URL=https://your-public-backend.example.com
 
 Do not append `/api`; the application request paths already start with `/api`.
 
-## Database ID mapping
+## Database reference data
 
-The backend does not provide list endpoints for categories, payment methods, or order statuses. Open **Settings** in the frontend and enter the IDs used by the database.
+The frontend does not assume numeric payment-method or order-status IDs:
 
-The included seed script assumes:
+- Checkout calls `GET /api/reference/payment-methods` and uses the returned IDs for `COD` and `QR_CODE`.
+- Admin Orders calls `GET /api/reference/order-statuses` and uses the returned IDs for status updates.
+- The current order status is selected automatically in each Admin dropdown.
 
-- Category: `1`
-- COD: `1`
-- QR: `2`
-- `PENDING`, `PROCESSING`, `SHIPPED`, `DELIVERED`, and `CANCELLED`: IDs `1` through `5`
-
-The SQL script prints the actual IDs at the end.
+The Admin-only category default remains configurable because the backend still has no category-list endpoint. The API base URL is fixed at build time with `VITE_API_BASE_URL`; Customer accounts cannot edit it in Settings.
 
 ## Build verification
 
@@ -138,12 +136,12 @@ Follow [GITHUB_PUBLISHING.md](GITHUB_PUBLISHING.md) to create and push the repos
 
 GitHub Pages hosts only static files. It cannot run the Spring Boot backend or use the local Vite proxy. For a functional Pages deployment, host the backend publicly over HTTPS, configure Spring Security CORS for the Pages domain, and set the repository variable `VITE_API_BASE_URL` before manually running the Pages workflow.
 
-## Known backend issues exposed by testing
+## Backend notes
 
-- No API exists to list categories, payment methods, or order statuses.
-- Address endpoints return the `Address` entity with its nested `User`; a response DTO should replace it to avoid exposing fields such as `passwordHash`.
-- Spring MVC CORS is configured, but the Spring Security filter chain must also enable CORS for cross-origin production hosting.
-- Product creation and QR receipt upload require valid Cloudinary configuration.
+- The added reference-data endpoints expose supported payment methods and valid order statuses without relying on fixed database IDs.
+- Order responses now include the applied voucher code and uploaded receipt URL for Customer history and Admin verification.
+- Product creation and QR receipt upload still require valid Cloudinary configuration.
+- GitHub Pages still requires Spring Security CORS to allow the deployed frontend origin.
 
 ## Project structure
 

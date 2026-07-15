@@ -1,43 +1,72 @@
 const SESSION_KEY = 'swt301_session';
 const CONFIG_KEY = 'swt301_frontend_config';
+const LEGACY_AUTH_KEYS = ['token', 'jwt', 'authToken', 'user', 'swt301_token'];
+const API_BASE_URL = String(import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '');
 
-export function getSession() {
+function decodeJwtPayload(token) {
+  if (typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 3 || parts.some((part) => !part)) return null;
   try {
-    return JSON.parse(localStorage.getItem(SESSION_KEY)) || null;
+    const normalized = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padding = '='.repeat((4 - (normalized.length % 4)) % 4);
+    return JSON.parse(decodeURIComponent(Array.from(atob(normalized + padding))
+      .map((character) => `%${character.charCodeAt(0).toString(16).padStart(2, '0')}`)
+      .join('')));
   } catch {
     return null;
   }
 }
 
+export function isSessionUsable(session) {
+  if (!session || typeof session !== 'object' || typeof session.token !== 'string') return false;
+  const payload = decodeJwtPayload(session.token);
+  if (!payload || typeof payload.exp !== 'number' || !Number.isFinite(payload.exp)) return false;
+  return payload.exp * 1000 > Date.now();
+}
+
+export function getSession() {
+  const raw = localStorage.getItem(SESSION_KEY);
+  if (!raw) return null;
+  try {
+    const session = JSON.parse(raw);
+    if (!isSessionUsable(session)) {
+      clearSession();
+      emitAuthExpired();
+      return null;
+    }
+    return session;
+  } catch {
+    clearSession();
+    emitAuthExpired();
+    return null;
+  }
+}
+
 export function saveSession(session) {
+  if (!isSessionUsable(session)) {
+    throw new Error('The backend returned a malformed or expired JWT.');
+  }
   localStorage.setItem(SESSION_KEY, JSON.stringify(session));
 }
 
 export function clearSession() {
   localStorage.removeItem(SESSION_KEY);
+  LEGACY_AUTH_KEYS.forEach((key) => localStorage.removeItem(key));
 }
 
 export function getConfig() {
   const defaults = {
-    apiBaseUrl: import.meta.env.VITE_API_BASE_URL || '',
-    categoryId: 1,
-    paymentMethodCodId: 1,
-    paymentMethodQrId: 2,
-    statusIds: {
-      PENDING: 7,
-      PROCESSING: 8,
-      SHIPPED: 11,
-      DELIVERED: 12,
-      CANCELLED: 13
-    }
+    apiBaseUrl: API_BASE_URL,
+    categoryId: 1
   };
 
   try {
     const saved = JSON.parse(localStorage.getItem(CONFIG_KEY)) || {};
+    const categoryId = Number(saved.categoryId);
     return {
       ...defaults,
-      ...saved,
-      statusIds: { ...defaults.statusIds, ...(saved.statusIds || {}) }
+      categoryId: Number.isInteger(categoryId) && categoryId > 0 ? categoryId : defaults.categoryId
     };
   } catch {
     return defaults;
@@ -45,12 +74,14 @@ export function getConfig() {
 }
 
 export function saveConfig(config) {
-  localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+  const categoryId = Number(config?.categoryId);
+  localStorage.setItem(CONFIG_KEY, JSON.stringify({
+    categoryId: Number.isInteger(categoryId) && categoryId > 0 ? categoryId : 1
+  }));
 }
 
 function buildUrl(path) {
-  const base = getConfig().apiBaseUrl.trim().replace(/\/$/, '');
-  return `${base}${path}`;
+  return `${API_BASE_URL}${path}`;
 }
 
 function extractErrorMessage(payload, status) {
@@ -85,8 +116,19 @@ function emitApiLog(detail) {
   }));
 }
 
+function emitAuthExpired() {
+  window.dispatchEvent(new CustomEvent('swt-auth-expired'));
+}
+
 export async function apiRequest(path, options = {}) {
+  const hadStoredSession = Boolean(localStorage.getItem(SESSION_KEY));
   const session = getSession();
+  if (hadStoredSession && !session) {
+    const error = new Error('Session expired or token is invalid.');
+    error.status = 401;
+    error.authExpired = true;
+    throw error;
+  }
   const method = options.method || 'GET';
   const isFormData = options.body instanceof FormData;
   const responseType = options.responseType || 'json';
@@ -145,10 +187,14 @@ export async function apiRequest(path, options = {}) {
     });
 
     if (!response.ok) {
-      if (response.status === 401) clearSession();
       const error = new Error(extractErrorMessage(payload, response.status));
       error.status = response.status;
       error.payload = payload;
+      if (response.status === 401 && session?.token) {
+        clearSession();
+        error.authExpired = true;
+        emitAuthExpired();
+      }
       throw error;
     }
 
@@ -213,6 +259,8 @@ export const api = {
   ),
   checkout: (payload) => apiRequest('/api/orders/checkout', { method: 'POST', body: payload }),
   orders: () => apiRequest('/api/orders'),
+  paymentMethods: () => apiRequest('/api/reference/payment-methods'),
+  orderStatuses: () => apiRequest('/api/reference/order-statuses'),
   paymentQrInfo: (orderId) => apiRequest(`/api/orders/${orderId}/payment/qr-info`),
   paymentQrCode: (orderId) => apiRequest(`/api/orders/${orderId}/payment/qr-code`, { responseType: 'blob' }),
   uploadQr: (orderId, file) => {
