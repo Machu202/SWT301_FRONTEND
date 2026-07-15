@@ -1,5 +1,5 @@
 Test Case ID,Feature,Precondition,Test Data,Steps,Expected Result,Type
-TC-AUTH-001,Login,Valid CUSTOMER exists,customer / Customer@123,Open login; enter credentials; submit,JWT is stored and CUSTOMER dashboard appears,Normal
+TC-AUTH-001,Login,Valid CUSTOMER exists,customer / Customer@123,Open login; enter credentials; submit,JWT is stored in sessionStorage and CUSTOMER dashboard appears,Normal
 TC-AUTH-002,Login,Valid user exists,Correct username / wrong password,Submit login,Error is shown and dashboard does not open,Abnormal
 TC-AUTH-003,Login,None,Blank username and password,Submit login,Browser required validation blocks request,Boundary
 TC-AUTH-004,Register,Username does not exist,username length 3; password length 6,Complete register form; submit,CUSTOMER account is created,Boundary
@@ -25,29 +25,51 @@ TC-VOUCH-004,Voucher,Cart has items,EMPTYQTY,Preview order,Backend returns inval
 TC-VOUCH-005,Voucher,Cart subtotal below minimum,FIXED50,Preview order,Backend returns minimum-order validation error,Boundary
 TC-PRICE-001,Shipping Fee,Cart subtotal 499999,None,Preview order,Shipping fee is 30000,Boundary
 TC-PRICE-002,Shipping Fee,Cart subtotal 500000,None,Preview order,Shipping fee is 0,Boundary
-TC-ORDER-001,COD Checkout,Cart and address exist,Select COD returned by backend,Preview current voucher; choose COD radio; place order,Order is PENDING; payment is PENDING; cart clears,Normal
-TC-ORDER-002,QR Checkout,Cart and address exist,Select QR_CODE returned by backend,Preview current voucher; choose QR_CODE radio; place order,Payment status is AWAITING_PAYMENT,Normal
+TC-ORDER-001,COD Checkout,Cart and address exist,Select COD returned by backend,Wait for automatic price preview; choose COD radio; place order,Order is PENDING; payment is PENDING; cart clears,Normal
+TC-ORDER-002,QR Checkout,Cart and address exist,Select QR_CODE returned by backend,Wait for automatic price preview; choose QR_CODE radio; place order,Payment status is AWAITING_PAYMENT and the backend provides an order-specific QR for the exact amount and order code,Normal
 TC-ORDER-003,Empty Cart Checkout,Cart is empty,None,Open Checkout,Place-order control is unavailable,Abnormal
 TC-QR-001,QR Upload,QR order is awaiting payment,Valid PNG under 5 MB,Upload receipt,Payment becomes PENDING_VERIFICATION,Normal
 TC-QR-002,QR Upload,QR order exists,PDF file,Attempt upload,Frontend/backend rejects file type,Abnormal
 TC-QR-003,QR Upload,QR order exists,Image over 5 MB,Attempt upload,Frontend/backend rejects file size,Boundary
-TC-ADMIN-001,Create Product,ADMIN logged in,Valid category ID and fields,Open Products; New product; save,Product is created and appears in catalog,Normal
+TC-ADMIN-001,Create Product,ADMIN logged in,Valid category returned by backend and valid product fields,Open Products; New product; save,Product is created and appears in catalog,Normal
 TC-ADMIN-002,Create Product,ADMIN logged in,Negative price,Submit product,Validation rejects price,Boundary
 TC-ADMIN-003,Update Product,Product exists,New name and stock,Edit product; save,Backend product is updated,Normal
-TC-ADMIN-004,Delete Product,Product exists,None,Click Delete; confirm,Product is removed,Normal
+TC-ADMIN-004,Deactivate Product,Product exists,None,Click Deactivate; confirm,Product status becomes INACTIVE and it disappears from the public catalog without a foreign-key hard-delete error,Normal
 TC-ADMIN-005,Order Status,ADMIN logged in; order exists,Select PROCESSING from backend status list,Open Admin Orders; verify current status is selected; choose PROCESSING; update,Order response shows PROCESSING,State
 TC-ADMIN-006,Payment Verification,QR receipt pending,PAID,Click View Receipt; inspect image; choose PAID; update,Payment status changes to PAID,State
-TC-DATA-001,Response Contract,Products exist,None,Run TC-DATA-01,All ProductResponse fields required by UI exist,Contract
-TC-AUTH-008,JWT Expiration,Expired or malformed JWT exists in localStorage,Expired JWT with exp in the past,Reload the page,Session is cleared before Dashboard renders and Login appears,Security
+TC-DATA-001,Response Contract,Products exist,None,Run TC-PUB-01 in Test Lab,Paged ProductResponse and independent CategoryResponse data required by the UI are present,Contract
+TC-AUTH-008,JWT Expiration,Expired or malformed JWT exists in sessionStorage,Expired JWT with exp in the past,Reload the page,Session is cleared before Dashboard renders and Login appears,Security
 TC-AUTH-009,HTTP 401 Handling,Authenticated screen is open,Backend returns HTTP 401,Trigger an authenticated API call,All user state and API logs are cleared; payment polling stops; Login appears immediately,Security
 TC-AUTH-010,Logout Cleanup,"Customer or Admin has loaded profile, addresses, orders, preview, and logs",,Click Logout; log in as a different account,"No profile, address, order, voucher, checkout preview, admin order, or API-log data from the previous account remains",Security
 TC-SEC-003,API URL Protection,Logged in as CUSTOMER,,Open Settings,API base URL is visible but not editable; no arbitrary URL can be saved,Security
 TC-REF-001,Payment Method Reference,CUSTOMER logged in; payment methods exist in database,Database IDs are not 1 and 2,Open Checkout,COD and QR_CODE radios use IDs returned by GET /api/reference/payment-methods,Contract
 TC-REF-002,Order Status Reference,ADMIN logged in; statuses exist in database,Database IDs differ from prior defaults,Open Admin Orders,Status options use IDs returned by GET /api/reference/order-statuses,Contract
-TC-ORDER-004,Voucher Preview Invalidation,Cart has items; voucher A preview succeeded,Change voucher A to voucher B,Edit voucher input after Preview,Old preview is cleared and Place Order is disabled until Preview is run again,State
+TC-ORDER-004,Voucher Preview Invalidation,Cart has items; voucher A automatic preview succeeded,Change voucher A to voucher B,Edit voucher input and stop typing for at least 300 ms,Old preview clears; voucher B preview runs automatically; Place Order remains disabled until the new preview succeeds,State
 TC-ORDER-005,Labeled Pending States,COD order exists with order and payment both PENDING,,Open My Orders,UI shows Order: PENDING and Payment: PENDING instead of two unlabeled PENDING badges,Usability
-TC-ORDER-006,Order Receipt History,QR receipt has been uploaded,Valid receipt URL,Open My Orders; click View uploaded receipt,Voucher and receipt status are shown and receipt image opens,Normal
-TC-ADMIN-007,Receipt Review,QR receipt has been uploaded,Valid receipt URL,Open Admin Orders; click View Receipt,Admin can inspect the receipt before verification,Normal
+TC-ORDER-006,Order Receipt History,QR receipt has been uploaded,Authenticated order with uploaded receipt,Open My Orders; click View uploaded receipt,"Voucher, product items, upload/verification timestamps, and the protected receipt image are shown without exposing a permanent public URL",Normal
+TC-ADMIN-007,Receipt Review,QR receipt has been uploaded,Authenticated Admin and uploaded receipt,Open Admin Orders; click View Receipt,Admin can inspect the protected receipt before verification,Normal
 TC-ADMIN-008,Current Status Selection,Order status is DELIVERED,,Open Admin Orders,DELIVERED is selected in that order status dropdown,State
-TC-DASH-001,Admin Revenue,"Orders include cancelled, unpaid, paid, and delivered records",,Open Admin Dashboard,Recognized revenue includes only orders whose payment is PAID or order status is DELIVERED,Calculation
+TC-DASH-001,Admin Revenue,"Orders include cancelled, unpaid, paid, and delivered records",,Open Admin Dashboard,Recognized revenue includes only payments whose status is PAID,Calculation
 TC-DASH-002,Customer Cart Quantity,Cart has two products with quantity 5 each,,Open Customer Dashboard,Cart quantity metric displays 10 and distinct product count displays 2,Calculation
+TC-DASH-003,Dashboard API Failure,One Customer dashboard API is forced to fail,Products or Cart or Addresses or Orders returns an error,Open Dashboard,Only the failed metric shows Unavailable and its own error; successful metrics retain real values,Error handling
+TC-DASH-004,Admin Readiness Failure,Admin Orders API is forced to fail,Admin Orders returns an error while other APIs succeed,Open Admin Dashboard,Testing Readiness marks Admin order endpoint FAILED and never treats an empty fallback array as READY,Error handling
+TC-ADDR-005,Manual Checkout Snapshot,Cart has items and valid payment methods,Valid manual receiver and address fields,Choose manual address and place an order,No standalone Address row is created; the order stores an immutable delivery snapshot,Integration
+TC-NET-001,Request Timeout,Backend endpoint intentionally delays beyond configured timeout,VITE_API_TIMEOUT_MS=15000,Trigger the delayed request,Request is aborted at timeout and the control leaves Loading/Processing state with an error,Reliability
+TC-NET-002,View Request Cancellation,A slow request is active on Products,Navigate to Orders before the response returns,Change view during request,The old request is aborted and cannot overwrite state or UI for the new view,Reliability
+TC-LOG-001,PII Redaction,API logging enabled in development,"Profile, address, order, receipt and account data returned",Use app then inspect Test Lab API log,"Email, phone, address, receiver, note, receipt and bank-account fields are redacted",Security
+TC-PROD-005,Search Debounce,Many products exist,Type several characters quickly,Type in Product search,Only the debounced search runs after about 250 ms; the list does not rerender for every keystroke,Performance
+TC-REF-003,Empty Category Availability,A category exists with no products,Category with zero products,Open Products and Admin New Product,The independent category endpoint still shows the category in filters and the product form,Contract
+TC-PROD-006,Product Image Preview,ADMIN logged in,Valid JPG or PNG under 5 MB,Choose image in Create/Edit Product,"Preview shows image, filename, MIME type and size; Remove selected file clears it",Usability
+TC-PROD-007,Remove Current Product Image,Product has an image,Select Remove current image,Edit and save product,Database image fields clear and the old Cloudinary asset is deleted,Integration
+TC-PROD-008,Product File Signature,ADMIN logged in,Executable/text file renamed to .jpg,Attempt product upload,Frontend and backend reject MIME/extension/signature mismatch,Security
+TC-PAGE-001,Product Pagination,More products than page size,Page size 12,Use Next/Previous on Products,Only one backend page renders and metadata remains correct,Performance
+TC-PAGE-002,Order Pagination,More orders than page size,Page size 10,Use Next/Previous on Customer and Admin Orders,Only the selected backend page renders and item details remain available,Performance
+TC-CART-007,Clear Cart,Cart has multiple items,Confirm Clear Cart,Click Clear Cart and confirm,All cart items are removed in one request and checkout preview is invalidated,Normal
+TC-POLL-001,Payment Poll Failure Limit,QR payment is pending verification and backend is unreachable,Three consecutive non-401 failures,Wait for automatic refresh,Polling stops after three failures and shows a visible retry instruction,Reliability
+TC-QR-004,Dynamic QR Configuration,QR order exists and backend bank environment variables are configured,Order total and order code,Open Show payment QR,"Backend QR encodes the exact amount and order code; bank details come from backend response, not app.js",Contract
+TC-IDEMP-001,Checkout Idempotency,Cart has items,Reuse one Idempotency-Key after a simulated lost response,Send checkout twice with the same key,Only one order exists and the retry returns that order,Concurrency
+TC-STATUS-001,Inactive Product Public Filter,Product is INACTIVE,Inactive product ID,Load public product page and product detail,Inactive product is absent or returns not found,Security
+TC-STATUS-002,Inactive Product Cart/Checkout,Product becomes INACTIVE after being added to cart,Existing cart item,Update cart or checkout,Backend rejects the inactive product before order creation,Business rule
+TC-SEC-004,Secret-free Source,Repository is prepared for GitHub,Search source for DB/Cloudinary/JWT secrets,Inspect application.yml and code,Only environment placeholders exist; backend refuses startup when required JWT/payment configuration is missing,Security
+TC-ORD-007,Order Address Immutability,Order exists from a saved address,Edit the original saved address,Open old My Orders record,Historical receiver and address remain unchanged because Order uses snapshots,Data integrity
+TC-ORD-008,Current Price Checkout,Product is already in cart; Admin changes price,Old and new product price,Preview and checkout after price change,"Preview and final OrderItem use current Product price, not stale CartItem price",Business rule

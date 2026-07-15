@@ -1,40 +1,35 @@
 # Frontend-to-Backend API Mapping
 
-| Frontend workflow | Method | Backend endpoint | Role |
+| Workflow | Method | Endpoint | Role |
 |---|---:|---|---|
 | Login | POST | `/api/auth/login` | Public |
 | Register | POST | `/api/auth/register` | Public |
-| Read profile | GET | `/api/profile` | CUSTOMER / ADMIN |
-| Update profile | PUT | `/api/profile` | CUSTOMER / ADMIN |
-| Product catalog | GET | `/api/products` | Public |
-| Product details | GET | `/api/products/{id}` | Public |
-| Create product | POST multipart | `/api/admin/products` | ADMIN |
-| Update product | PUT multipart | `/api/admin/products/{id}` | ADMIN |
-| Delete product | DELETE | `/api/admin/products/{id}` | ADMIN |
-| Read cart | GET | `/api/carts` | CUSTOMER |
-| Add cart item | POST | `/api/carts/items` | CUSTOMER |
-| Replace cart quantity | PUT | `/api/carts/items` | CUSTOMER |
-| Remove cart item | DELETE | `/api/carts/items/{cartItemId}` | CUSTOMER |
-| Read addresses | GET | `/api/addresses` | CUSTOMER |
-| Create address | POST | `/api/addresses` | CUSTOMER |
-| Update address | PUT | `/api/addresses/{id}` | CUSTOMER |
-| Delete address | DELETE | `/api/addresses/{id}` | CUSTOMER |
-| Validate voucher | GET | `/api/vouchers/check` | CUSTOMER |
-| Load supported payment methods | GET | `/api/reference/payment-methods` | CUSTOMER / ADMIN |
-| Load valid order statuses | GET | `/api/reference/order-statuses` | ADMIN |
-| Preview checkout | GET | `/api/orders/preview` | CUSTOMER |
-| Create order | POST | `/api/orders/checkout` | CUSTOMER |
-| Read QR payment information | GET | `/api/orders/{orderId}/payment/qr-info` | CUSTOMER |
-| Read configured VietQR payment image | GET | `/api/orders/{orderId}/payment/qr-code` | CUSTOMER |
-| Upload QR receipt | POST multipart | `/api/orders/{orderId}/payment/qr` | CUSTOMER |
-| Customer order history | GET | `/api/orders` | CUSTOMER |
-| All system orders | GET | `/api/admin/orders` | ADMIN |
-| Change order status | PUT | `/api/admin/orders/{id}/status` | ADMIN |
-| Verify payment | PUT | `/api/admin/orders/{id}/payment` | ADMIN |
+| Profile | GET / PUT | `/api/profile` | Customer/Admin |
+| Product page | GET | `/api/products/page` | Public |
+| Categories | GET | `/api/reference/categories` | Public |
+| Admin product page | GET | `/api/admin/products` | Admin |
+| Create/update product | POST / PUT multipart | `/api/admin/products`, `/api/admin/products/{id}` | Admin |
+| Deactivate product | DELETE | `/api/admin/products/{id}` | Admin |
+| Cart | GET | `/api/carts` | Customer |
+| Add/update cart item | POST / PUT | `/api/carts/items` | Customer |
+| Remove cart item | DELETE | `/api/carts/items/{cartItemId}` | Customer |
+| Clear cart | DELETE | `/api/carts/items` | Customer |
+| Addresses | GET / POST | `/api/addresses` | Customer |
+| Address update/delete | PUT / DELETE | `/api/addresses/{id}` | Customer |
+| Price preview | GET | `/api/orders/preview?voucherCode=` | Customer |
+| Payment methods | GET | `/api/reference/payment-methods` | Customer/Admin |
+| Checkout | POST + `Idempotency-Key` | `/api/orders/checkout` | Customer |
+| Customer order page | GET | `/api/orders/page` | Customer |
+| Dynamic QR information | GET | `/api/orders/{id}/payment/qr-info` | Order owner |
+| Dynamic QR image | GET | `/api/orders/{id}/payment/qr-code` | Order owner |
+| Upload receipt | POST multipart | `/api/orders/{id}/payment/qr` | Order owner |
+| Protected customer receipt | GET | `/api/orders/{id}/payment/receipt` | Order owner |
+| Admin order page | GET | `/api/admin/orders/page` | Admin |
+| Admin paid-revenue metrics | GET | `/api/admin/orders/metrics` | Admin |
+| Order statuses | GET | `/api/reference/order-statuses` | Admin |
+| Admin QR information/image | GET | `/api/admin/orders/{id}/payment/qr-info`, `/qr-code` | Admin |
+| Protected Admin receipt | GET | `/api/admin/orders/{id}/payment/receipt` | Admin |
+| Change order status | PUT | `/api/admin/orders/{id}/status?statusId=` | Admin |
+| Verify QR payment | PUT | `/api/admin/orders/{id}/payment?paymentStatus=` | Admin |
 
-All authenticated calls send `Authorization: Bearer <JWT>`.
-
-The frontend does not store payment-method IDs or order-status IDs as constants. It loads them from the two reference-data endpoints. The API base URL is fixed at build time by `VITE_API_BASE_URL` and cannot be changed by a Customer through Settings.
-
-
-The QR image endpoint preserves Customer ownership and QR-payment validation before returning the bundled MB VietQR image. The frontend also bundles the same image so Checkout, receipt upload, My Orders, and Admin Orders use one consistent payment QR.
+Authenticated calls send `Authorization: Bearer <JWT>`. Checkout also sends a unique `Idempotency-Key` so retrying a timed-out request does not create a duplicate order.

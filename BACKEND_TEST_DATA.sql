@@ -58,7 +58,7 @@ ON CONFLICT (voucher_code) DO NOTHING;
 
 COMMIT;
 
--- Verify the IDs used by the frontend Settings screen:
+-- Verify reference data. The frontend fetches these IDs dynamically and stores no default database IDs:
 SELECT role_id, role_name FROM roles ORDER BY role_id;
 SELECT category_id, category_name FROM categories ORDER BY category_id;
 SELECT payment_method_id, method_name FROM payment_methods ORDER BY payment_method_id;

@@ -1,170 +1,93 @@
 # SWT301 E-commerce Testing Frontend
 
-A backend-connected Vite frontend for the `SWT301_BACKEND-main` Spring Boot project. It is designed for manual, API-integration, authorization, boundary-value, and automated UI testing using real backend data.
+A Vite frontend connected to the SWT301 Spring Boot backend. It is intended for manual, integration, authorization, boundary-value, and workflow testing with real database data.
 
-## Main workflows
+## Implemented workflows
 
-### Public and authentication
+### Authentication and session security
 
-- Backend connection check
-- Customer registration
-- Customer and admin login
-- JWT session persistence with malformed/expired token rejection
-- Full client-state cleanup on logout or authenticated HTTP 401
-- Role-based navigation and access checks
+- Customer registration and Customer/Admin login
+- Show/Hide password on Login and Register
+- Strict role validation; unknown roles are never treated as Customer
+- JWT stored in `sessionStorage`, not `localStorage`
+- JWT structure and `exp` checked before the dashboard opens
+- Logout and authenticated HTTP 401 clear the whole client state, cancel active requests, and stop payment polling
+- API destination fixed at build time; Settings cannot redirect JWT requests
 
 ### Customer
 
-- Browse and search products
-- Add and update cart items; removal requires confirmation
-- Create and update delivery addresses
-- Validate Vietnamese phone numbers
-- Check vouchers and preview backend-calculated totals
-- Checkout using backend-provided COD or QR payment IDs shown as radio buttons
-- Display the configured MB VietQR image during checkout, order review, receipt upload, and Admin QR review
-- View order history with voucher and uploaded receipt details
-- Upload JPG or PNG QR payment receipts up to 5 MB
+- Paginated ACTIVE product catalog with 250 ms search debounce
+- Independent category reference endpoint
+- Cart add/update/remove, confirmation before removal, and Clear Cart
+- Saved addresses or manual checkout address snapshots
+- Automatic voucher preview using current backend prices
+- COD and QR radio-button payment selection using IDs returned by the backend
+- Idempotent checkout requests
+- Order-specific dynamic VietQR generated for the exact amount and order code
+- Protected receipt upload/viewing
+- Paginated order history with immutable address, voucher, item lines, receipt upload time, and verification time
 
 ### Admin
 
-- Create and update products using multipart form data
-- Delete products
-- View all system orders
-- Update order status using the live backend status list with the current value preselected
-- View the configured payment QR and preview Customer receipts before verifying payment as `PAID`, `FAILED`, or `PENDING_VERIFICATION`
+- Paginated products and orders
+- Category selection from the backend; no browser-stored default category ID
+- Product image preview, filename/type/size, remove selected file, replace image, or remove current image
+- Product deactivation instead of physical deletion
+- Backend-provided order statuses with current status selected
+- Protected receipt preview before payment verification
+- Backend-enforced payment and order state rules
 
-### Software-testing support
+### Reliability and testing
 
-- Stable `data-testid` selectors on important controls
-- Built-in API evidence log with HTTP status and response time
-- Sensitive fields redacted from logs
-- Public, authenticated, authorization, and response-contract smoke checks
-- Manual test cases in `tests/MANUAL_TEST_CASES.csv`
-- Test checklist in `tests/TESTING_CHECKLIST.md`
-- PostgreSQL/Supabase seed data in `BACKEND_TEST_DATA.sql`
-- Endpoint mapping in `API_MAPPING.md`
+- Per-request timeout using `AbortController`
+- Requests cancelled when changing screens
+- Dashboard displays a separate error for each failed API area
+- Admin Testing Readiness tracks actual request success/failure
+- API evidence log enabled only in development/test by default, with personal data redacted
+- Test Lab includes Product, Cart CRUD, Voucher preview, Checkout, Receipt, Payment verification, and Order-status checks
 
 ## Requirements
 
-- Node.js 22
-- npm
-- The Spring Boot backend running on port `8080`
-- Configured PostgreSQL/Supabase, JWT secret, and Cloudinary credentials in the backend
+- Node.js 20.19+ or 22.12+
+- npm 10+
+- Backend running at `http://localhost:8080`
 
-## Local setup
-
-### 1. Start the backend
-
-From the backend folder on Windows:
-
-```powershell
-.\mvnw.cmd spring-boot:run
-```
-
-The backend must be available at `http://localhost:8080`.
-
-### 2. Add test data
-
-After Hibernate creates the database tables, run `BACKEND_TEST_DATA.sql` in Supabase SQL Editor or PostgreSQL.
-
-| Role | Username | Password |
-|---|---|---|
-| ADMIN | `admin` | `Admin@123` |
-| CUSTOMER | `customer` | `Customer@123` |
-
-The script also creates roles, categories, payment methods, order statuses, products, and voucher boundary data.
-
-### 3. Run the frontend
+## Run locally
 
 ```powershell
 npm ci
 npm run dev
 ```
 
-Open `http://localhost:5173`.
+Open `http://localhost:5173`. The Vite proxy forwards `/api` to the backend.
 
-The Vite development proxy forwards `/api` to `http://localhost:8080`. Do not open `index.html` directly and do not use Live Server.
+## Frontend environment
 
-## Environment configuration
-
-Copy `.env.example` to `.env` only when the frontend must call a backend at another origin:
-
-```powershell
-Copy-Item .env.example .env
-```
+Copy `.env.example` to `.env` only when needed:
 
 ```env
-VITE_API_BASE_URL=https://your-public-backend.example.com
+VITE_API_BASE_URL=
+VITE_API_TIMEOUT_MS=15000
+VITE_ENABLE_API_LOGS=false
 ```
 
-Do not append `/api`; the application request paths already start with `/api`.
+For a deployed frontend, `VITE_API_BASE_URL` must be the trusted HTTPS backend origin. Do not append `/api`.
 
-## Database reference data
+## Backend prerequisites
 
-The frontend does not assume numeric payment-method or order-status IDs:
+The backend now requires environment variables for database, JWT, Cloudinary, and payment-bank configuration. Read the backend files:
 
-- Checkout calls `GET /api/reference/payment-methods` and uses the returned IDs for `COD` and `QR_CODE`.
-- Admin Orders calls `GET /api/reference/order-statuses` and uses the returned IDs for status updates.
-- The current order status is selected automatically in each Admin dropdown.
+- `.env.example`
+- `SECURITY_AND_MIGRATION_README.md`
+- `DATABASE_MIGRATION_SECURITY_PERFORMANCE.sql`
 
-The Admin-only category default remains configurable because the backend still has no category-list endpoint. The API base URL is fixed at build time with `VITE_API_BASE_URL`; Customer accounts cannot edit it in Settings.
+Rotate any old database, Cloudinary, and JWT credentials before running or publishing the source.
 
 ## Build verification
 
 ```powershell
 npm ci
 npm run build
-npm run preview
 ```
 
-The production files are generated in `dist/`, which is intentionally excluded from Git because GitHub Actions rebuilds it from source.
-
-## GitHub repository support
-
-This project includes:
-
-- `.gitignore` and `.gitattributes`
-- GitHub Actions build verification
-- Optional manual GitHub Pages deployment
-- Dependabot configuration
-- Bug-report issue template
-- Pull-request template
-- Contribution guide
-
-Follow [GITHUB_PUBLISHING.md](GITHUB_PUBLISHING.md) to create and push the repository.
-
-### GitHub Pages limitation
-
-GitHub Pages hosts only static files. It cannot run the Spring Boot backend or use the local Vite proxy. For a functional Pages deployment, host the backend publicly over HTTPS, configure Spring Security CORS for the Pages domain, and set the repository variable `VITE_API_BASE_URL` before manually running the Pages workflow.
-
-## Backend notes
-
-- The added reference-data endpoints expose supported payment methods and valid order statuses without relying on fixed database IDs.
-- Order responses now include the applied voucher code and uploaded receipt URL for Customer history and Admin verification.
-- The payment QR image is bundled into both frontend and backend; QR receipt upload still requires valid Cloudinary configuration.
-- The configured payment destination is MB account `0846511618`, account name `CAO LE ANH KHOA`; Customers should use the order code as the transfer note.
-- GitHub Pages still requires Spring Security CORS to allow the deployed frontend origin.
-
-## Project structure
-
-```text
-SWT301_FRONTEND/
-├── .github/                 GitHub Actions and repository templates
-├── src/                     Frontend source and configured VietQR asset
-├── tests/                   Manual testing assets
-├── .env.example             Environment variable template
-├── API_MAPPING.md           Frontend/backend endpoint mapping
-├── BACKEND_TEST_DATA.sql    Repeatable testing seed data
-├── CONTRIBUTING.md          Contribution workflow
-├── GITHUB_PUBLISHING.md     Repository publication instructions
-├── index.html               Vite entry page
-├── package.json             npm scripts and dependencies
-└── vite.config.js           Vite proxy and build configuration
-```
-
-## npm registry troubleshooting
-
-This repository is configured to use the public npm registry through the project-level `.npmrc` file.
-If a previous failed install left locked files on Windows, close Node/Vite terminals, remove `node_modules`, clear npm's proxy settings if necessary, and run `npm ci` again.
-
-Vite 7 requires Node.js 20.19 or newer.
+`dist/` and `node_modules/` are intentionally excluded from Git.

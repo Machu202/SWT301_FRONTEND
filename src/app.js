@@ -1,12 +1,13 @@
 import './styles.css';
-import paymentQrAsset from './assets/vietqr-payment.png';
 import {
   api,
   getSession,
   saveSession,
   clearSession,
   getConfig,
-  saveConfig
+  startRequestScope,
+  cancelRequestScope,
+  isApiLogEnabled
 } from './api.js';
 
 const app = document.querySelector('#app');
@@ -15,29 +16,36 @@ const state = {
   session: getSession(),
   view: 'dashboard',
   products: [],
+  productPage: { page: 0, size: 12, totalElements: 0, totalPages: 0 },
+  categories: [],
   cart: null,
   addresses: [],
   orders: [],
+  ordersPage: { page: 0, size: 10, totalElements: 0, totalPages: 0 },
   adminOrders: [],
+  adminOrdersPage: { page: 0, size: 10, totalElements: 0, totalPages: 0 },
   apiLogs: [],
+  requestStatus: {},
   search: '',
+  debouncedSearch: '',
+  searchDebounceTimer: null,
   category: 'ALL',
   authTab: 'login',
   checkoutVoucher: '',
   checkoutPreview: null,
   checkoutPreviewVoucher: null,
+  checkoutPreviewTimer: null,
+  checkoutIdempotencyKey: null,
   paymentMethods: [],
   orderStatuses: [],
   profile: null,
   loginMode: 'username',
-  paymentPollTimer: null
+  paymentPollTimer: null,
+  paymentPollFailures: 0
 };
 
 const VALID_ROLES = new Set(['ADMIN', 'CUSTOMER']);
 const VIETNAM_PHONE_PATTERN = '^(?:0[35789][0-9]{8}|\+84[35789][0-9]{8})$';
-const PAYMENT_QR_BANK = 'MB';
-const PAYMENT_QR_ACCOUNT_NAME = 'CAO LE ANH KHOA';
-const PAYMENT_QR_ACCOUNT_NUMBER = '0846511618';
 const role = () => String(state.session?.role || '').replace(/^ROLE_/i, '').trim().toUpperCase();
 const hasValidRole = () => VALID_ROLES.has(role());
 const isAdmin = () => role() === 'ADMIN';
@@ -89,20 +97,10 @@ function englishProductName(value) {
 }
 
 function productCategoryChoices() {
-  const choices = new Map();
-  state.products.forEach((product) => {
-    const categoryId = Number(product.categoryId);
-    if (!Number.isInteger(categoryId) || categoryId < 1) return;
-    if (!choices.has(categoryId)) {
-      choices.set(categoryId, {
-        categoryId,
-        rawName: String(product.categoryName || `Category ${categoryId}`)
-      });
-    }
-  });
-  return [...choices.values()].sort((a, b) =>
-    englishCategoryName(a.rawName).localeCompare(englishCategoryName(b.rawName), 'en')
-  );
+  return [...state.categories]
+    .filter((category) => Number.isInteger(Number(category.categoryId)))
+    .map((category) => ({ categoryId: Number(category.categoryId), rawName: String(category.categoryName || '') }))
+    .sort((a, b) => englishCategoryName(a.rawName).localeCompare(englishCategoryName(b.rawName), 'en'));
 }
 
 function sanitizePhoneValue(value) {
@@ -127,31 +125,41 @@ function bindPhoneOnlyInput(input) {
 }
 
 function stopPaymentPolling() {
-  if (state.paymentPollTimer) {
-    clearInterval(state.paymentPollTimer);
-    state.paymentPollTimer = null;
-  }
+  if (state.paymentPollTimer) clearInterval(state.paymentPollTimer);
+  state.paymentPollTimer = null;
+  state.paymentPollFailures = 0;
 }
 
 function resetAuthenticatedState() {
   stopPaymentPolling();
+  cancelRequestScope();
+  clearTimeout(state.searchDebounceTimer);
+  clearTimeout(state.checkoutPreviewTimer);
   closeModal();
   state.session = null;
   state.view = 'dashboard';
   state.products = [];
+  state.productPage = { page: 0, size: 12, totalElements: 0, totalPages: 0 };
+  state.categories = [];
   state.cart = null;
   state.addresses = [];
   state.orders = [];
+  state.ordersPage = { page: 0, size: 10, totalElements: 0, totalPages: 0 };
   state.adminOrders = [];
+  state.adminOrdersPage = { page: 0, size: 10, totalElements: 0, totalPages: 0 };
   state.apiLogs = [];
+  state.requestStatus = {};
   state.search = '';
+  state.debouncedSearch = '';
   state.category = 'ALL';
   state.checkoutVoucher = '';
   state.checkoutPreview = null;
   state.checkoutPreviewVoucher = null;
+  state.checkoutIdempotencyKey = null;
   state.paymentMethods = [];
   state.orderStatuses = [];
   state.profile = null;
+  state.paymentPollFailures = 0;
   document.querySelector('.toast-container')?.remove();
 }
 
@@ -245,6 +253,72 @@ function empty(title, text) {
   return `<div class="empty"><strong>${escapeHtml(title)}</strong>${escapeHtml(text)}</div>`;
 }
 
+function requestMetric(icon, label, value, requestKey) {
+  const result = state.requestStatus[requestKey];
+  if (result?.ok === false) {
+    return `<div class="card metric metric-error"><div class="metric-icon">!</div><div><span>${escapeHtml(label)}</span><strong>Unavailable</strong><small>${escapeHtml(result.error || 'Request failed')}</small></div></div>`;
+  }
+  return metric(icon, label, value);
+}
+
+function recordRequestStatus(key, result) {
+  state.requestStatus[key] = result.status === 'fulfilled'
+    ? { ok: true, error: '' }
+    : { ok: false, error: result.reason?.message || 'Request failed' };
+}
+
+function paginationMarkup(pageInfo, prefix) {
+  const totalPages = Number(pageInfo?.totalPages || 0);
+  if (totalPages <= 1) return '';
+  const page = Number(pageInfo.page || 0);
+  return `<div class="pagination">
+    <button class="btn btn-secondary btn-sm" data-page-action="${prefix}:prev" ${page <= 0 ? 'disabled' : ''}>Previous</button>
+    <span>Page ${page + 1} of ${totalPages} · ${Number(pageInfo.totalElements || 0)} record(s)</span>
+    <button class="btn btn-secondary btn-sm" data-page-action="${prefix}:next" ${page + 1 >= totalPages ? 'disabled' : ''}>Next</button>
+  </div>`;
+}
+
+function bindPagination(container, prefix, pageInfo, onChange) {
+  container.querySelectorAll(`[data-page-action^="${prefix}:"]`).forEach((button) => {
+    button.addEventListener('click', () => {
+      const direction = button.dataset.pageAction.split(':')[1];
+      const nextPage = direction === 'next' ? pageInfo.page + 1 : pageInfo.page - 1;
+      onChange(Math.max(0, nextPage));
+    });
+  });
+}
+
+function createIdempotencyKey() {
+  if (crypto?.randomUUID) return crypto.randomUUID();
+  return `checkout-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function validateImageFile(file, label = 'Image') {
+  if (!file) return null;
+  const allowedTypes = new Set(['image/jpeg', 'image/png']);
+  const extension = String(file.name || '').split('.').pop().toLowerCase();
+  if (!allowedTypes.has(file.type) || !['jpg', 'jpeg', 'png'].includes(extension)) {
+    return `${label} must be a real JPG or PNG file.`;
+  }
+  if (file.size > 5 * 1024 * 1024) return `${label} must not exceed 5 MB.`;
+  return null;
+}
+
+function fileDetailsMarkup(file) {
+  if (!file) return '';
+  return `<div class="file-preview-meta"><strong>${escapeHtml(file.name)}</strong><span>${escapeHtml(file.type || 'Unknown type')} · ${(file.size / 1024).toFixed(1)} KB</span></div>`;
+}
+
+function showBlobImageModal(blob, title) {
+  const objectUrl = URL.createObjectURL(blob);
+  showModal({ title, body: `<img class="receipt-image" src="${objectUrl}" alt="${escapeHtml(title)}" />` });
+  const modal = document.querySelector('#active-modal');
+  const revoke = () => URL.revokeObjectURL(objectUrl);
+  modal?.addEventListener('click', (event) => {
+    if (event.target.matches('[data-close-modal], .modal-backdrop')) revoke();
+  }, { once: true });
+}
+
 function showModal({ title, body, footer = '', large = false }) {
   closeModal();
   const wrapper = document.createElement('div');
@@ -311,6 +385,8 @@ const viewTitles = {
 };
 
 function renderAuth() {
+  // Authentication requests need a fresh scope after logout, 401, or a failed login.
+  startRequestScope();
   app.innerHTML = `
     <main class="auth-page">
       <section class="auth-side">
@@ -394,7 +470,13 @@ function registerForm() {
         <div class="field"><label>Email</label><input class="input" name="email" type="email" required data-testid="register-email" /></div>
         <div class="field"><label>Vietnamese phone</label><input class="input" id="register-phone" name="phone" type="tel" inputmode="tel" maxlength="12" pattern="${VIETNAM_PHONE_PATTERN}" placeholder="0912345678 or +84912345678" required data-testid="register-phone" /><p class="help">Accepted: 10-digit local number or +84 format. Letters are blocked.</p></div>
       </div>
-      <div class="field" style="margin-top:14px"><label>Password</label><input class="input" name="password" type="password" minlength="6" maxlength="40" required data-testid="register-password" /></div>
+      <div class="field" style="margin-top:14px">
+        <label>Password</label>
+        <div class="password-input-wrap">
+          <input class="input" id="register-password" name="password" type="password" minlength="6" maxlength="40" required data-testid="register-password" />
+          <button class="btn btn-secondary password-toggle" type="button" id="toggle-register-password" aria-pressed="false" data-testid="toggle-register-password">Show</button>
+        </div>
+      </div>
       <button class="btn btn-primary" style="width:100%;margin-top:20px" type="submit" data-testid="register-submit">Register customer</button>
     </form>`;
 }
@@ -424,11 +506,20 @@ function bindAuthEvents() {
     passwordInput.focus();
   });
 
+  document.querySelector('#toggle-register-password')?.addEventListener('click', (event) => {
+    const passwordInput = document.querySelector('#register-password');
+    const showPassword = passwordInput.type === 'password';
+    passwordInput.type = showPassword ? 'text' : 'password';
+    event.currentTarget.textContent = showPassword ? 'Hide' : 'Show';
+    event.currentTarget.setAttribute('aria-pressed', String(showPassword));
+    passwordInput.focus();
+  });
+
   document.querySelector('#connection-check')?.addEventListener('click', async (event) => {
     setBusy(event.currentTarget, true, 'Checking...');
     try {
-      const products = await api.products();
-      toast(`Backend is reachable. ${products.length} product(s) returned.`);
+      const products = await api.productsPage({ page: 0, size: 1 });
+      toast(`Backend is reachable. ${products.totalElements || 0} active product(s) available.`);
     } catch (error) {
       toast(error.message, 'error', 'Connection failed');
     } finally {
@@ -553,6 +644,7 @@ function bindShellEvents() {
   document.querySelectorAll('[data-view]').forEach((button) => {
     button.addEventListener('click', () => {
       stopPaymentPolling();
+      cancelRequestScope();
       state.view = button.dataset.view;
       renderShell();
     });
@@ -572,6 +664,7 @@ async function renderCurrentView(force = false) {
   const container = document.querySelector('#view-content');
   if (!container) return;
   if (state.view !== 'orders') stopPaymentPolling();
+  startRequestScope();
   container.innerHTML = loading();
   try {
     switch (state.view) {
@@ -589,61 +682,85 @@ async function renderCurrentView(force = false) {
       default: await renderDashboard(container);
     }
   } catch (error) {
-    if (error.status === 401 || error.authExpired) return;
+    if (error.cancelled || error.status === 401 || error.authExpired) return;
     container.innerHTML = `<div class="card card-pad">${empty('Unable to load this screen', error.message)}</div>`;
   }
 }
 
 async function renderDashboard(container) {
+  state.requestStatus = {};
   if (isAdmin()) {
-    const [productsResult, ordersResult] = await Promise.allSettled([api.products(), api.adminOrders()]);
-    state.products = productsResult.status === 'fulfilled' ? productsResult.value : [];
-    state.adminOrders = ordersResult.status === 'fulfilled' ? ordersResult.value : [];
-    const revenue = state.adminOrders
-      .filter((order) => normalizeName(order.paymentStatus) === 'PAID' || normalizeName(order.status) === 'DELIVERED')
-      .reduce((sum, order) => sum + Number(order.total || 0), 0);
-    const pendingPayments = state.adminOrders.filter((order) => order.paymentStatus === 'PENDING_VERIFICATION').length;
+    const [productsResult, ordersResult, metricsResult] = await Promise.allSettled([
+      api.adminProductsPage({ page: 0, size: 5 }),
+      api.adminOrdersPage({ page: 0, size: 5 }),
+      api.adminOrderMetrics()
+    ]);
+    if (state.view !== 'dashboard' || !container.isConnected) return;
+    recordRequestStatus('products', productsResult);
+    recordRequestStatus('adminOrders', ordersResult);
+    recordRequestStatus('adminMetrics', metricsResult);
+    if (productsResult.status === 'fulfilled') {
+      state.products = productsResult.value.content || [];
+    }
+    if (ordersResult.status === 'fulfilled') {
+      state.adminOrders = ordersResult.value.content || [];
+    }
+    const metrics = metricsResult.status === 'fulfilled' ? metricsResult.value : null;
+    const revenue = Number(metrics?.paidRevenue || 0);
+    const pendingPayments = Number(metrics?.paymentsPendingVerification || 0);
     container.innerHTML = `
       <section class="hero">
-        <div><span class="badge">ADMIN TEST WORKSPACE</span><h2>System control and verification</h2><p>Manage products, inspect all orders, approve QR payments, and capture API evidence from a single deterministic interface.</p></div>
+        <div><span class="badge">ADMIN TEST WORKSPACE</span><h2>System control and verification</h2><p>Manage products, inspect orders, approve QR payments, and capture redacted API evidence.</p></div>
         <button class="btn btn-primary" data-go="admin-orders">Review orders</button>
       </section>
       <div class="grid grid-4">
-        ${metric('□', 'Products', state.products.length)}
-        ${metric('≡', 'Total orders', state.adminOrders.length)}
-        ${metric('₫', 'Recognized revenue', money(revenue))}
-        ${metric('!', 'Payments to verify', pendingPayments)}
+        ${requestMetric('□', 'Products', productsResult.status === 'fulfilled' ? productsResult.value.totalElements : '—', 'products')}
+        ${requestMetric('≡', 'Total orders', metrics ? metrics.totalOrders : '—', 'adminMetrics')}
+        ${requestMetric('₫', 'Paid revenue', money(revenue), 'adminMetrics')}
+        ${requestMetric('!', 'Payments to verify', pendingPayments, 'adminMetrics')}
       </div>
       <div class="grid grid-2" style="margin-top:18px">
-        <section class="card"><div class="card-header"><div><h3>Recent orders</h3><p>Most recent backend records</p></div></div>${ordersTable(state.adminOrders.slice(0, 5), true)}</section>
+        <section class="card"><div class="card-header"><div><h3>Recent orders</h3><p>Most recent backend records</p></div></div>${state.requestStatus.adminOrders?.ok ? ordersTable(state.adminOrders.slice(0, 5), true) : empty('Orders unavailable', state.requestStatus.adminOrders?.error || 'Request failed')}</section>
         <section class="card card-pad"><h3 style="margin-top:0">Testing readiness</h3>${readinessList()}</section>
       </div>`;
   } else {
     const [productsResult, cartResult, ordersResult, addressesResult] = await Promise.allSettled([
-      api.products(), api.cart(), api.orders(), api.addresses()
+      api.productsPage({ page: 0, size: 1 }),
+      api.cart(),
+      api.ordersPage({ page: 0, size: 5 }),
+      api.addresses()
     ]);
-    state.products = productsResult.status === 'fulfilled' ? productsResult.value : [];
-    state.cart = cartResult.status === 'fulfilled' ? cartResult.value : { items: [], totalCartPrice: 0 };
-    state.orders = ordersResult.status === 'fulfilled' ? ordersResult.value : [];
-    state.addresses = addressesResult.status === 'fulfilled' ? addressesResult.value : [];
+    if (state.view !== 'dashboard' || !container.isConnected) return;
+    recordRequestStatus('products', productsResult);
+    recordRequestStatus('cart', cartResult);
+    recordRequestStatus('orders', ordersResult);
+    recordRequestStatus('addresses', addressesResult);
+    if (productsResult.status === 'fulfilled') state.productPage = productsResult.value;
+    if (cartResult.status === 'fulfilled') state.cart = cartResult.value;
+    if (ordersResult.status === 'fulfilled') {
+      state.orders = ordersResult.value.content || [];
+      state.ordersPage = ordersResult.value;
+    }
+    if (addressesResult.status === 'fulfilled') state.addresses = addressesResult.value;
     const cartQuantity = (state.cart?.items || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
     container.innerHTML = `
       <section class="hero">
-        <div><span class="badge">CUSTOMER TEST WORKSPACE</span><h2>Test the full purchase journey</h2><p>Browse real products, validate cart boundaries, manage Vietnamese delivery details, apply vouchers, create orders, and upload QR payment evidence.</p></div>
+        <div><span class="badge">CUSTOMER TEST WORKSPACE</span><h2>Test the full purchase journey</h2><p>Each dashboard area reports its own API failure instead of silently showing zero.</p></div>
         <button class="btn btn-primary" data-go="products">Browse products</button>
       </section>
       <div class="grid grid-4">
-        ${metric('□', 'Products', state.products.length)}
-        ${metric('🛒', 'Cart quantity', cartQuantity)}
-        ${metric('⌂', 'Addresses', state.addresses.length)}
-        ${metric('≡', 'Orders', state.orders.length)}
+        ${requestMetric('□', 'Products', productsResult.status === 'fulfilled' ? productsResult.value.totalElements : '—', 'products')}
+        ${requestMetric('🛒', 'Cart quantity', cartQuantity, 'cart')}
+        ${requestMetric('⌂', 'Addresses', state.addresses.length, 'addresses')}
+        ${requestMetric('≡', 'Orders', ordersResult.status === 'fulfilled' ? ordersResult.value.totalElements : '—', 'orders')}
       </div>
       <div class="grid grid-2" style="margin-top:18px">
-        <section class="card"><div class="card-header"><div><h3>Recent orders</h3><p>Your latest backend orders</p></div></div>${ordersTable(state.orders.slice(0, 5), false)}</section>
-        <section class="card card-pad"><h3 style="margin-top:0">Current cart</h3><p class="help">${cartQuantity} total unit(s) across ${state.cart?.items?.length || 0} distinct product(s) · ${money(state.cart?.totalCartPrice)}</p><button class="btn btn-secondary" data-go="cart">Open cart</button></section>
+        <section class="card"><div class="card-header"><div><h3>Recent orders</h3><p>Your latest backend orders</p></div></div>${state.requestStatus.orders?.ok ? ordersTable(state.orders, false) : empty('Orders unavailable', state.requestStatus.orders?.error || 'Request failed')}</section>
+        <section class="card card-pad"><h3 style="margin-top:0">Current cart</h3>${state.requestStatus.cart?.ok ? `<p class="help">${cartQuantity} total unit(s) across ${state.cart?.items?.length || 0} distinct product(s) · ${money(state.cart?.totalCartPrice)}</p><button class="btn btn-secondary" data-go="cart">Open cart</button>` : empty('Cart unavailable', state.requestStatus.cart?.error || 'Request failed')}</section>
       </div>`;
   }
   container.querySelectorAll('[data-go]').forEach((button) => button.addEventListener('click', () => {
+    cancelRequestScope();
     state.view = button.dataset.go;
     renderShell();
   }));
@@ -656,86 +773,87 @@ function metric(icon, label, value) {
 function readinessList() {
   const checks = [
     ['Authentication', Boolean(state.session?.token)],
-    ['Product endpoint', Array.isArray(state.products)],
-    ['Admin order endpoint', Array.isArray(state.adminOrders)],
-    ['API evidence capture', true]
+    ['Product endpoint', state.requestStatus.products?.ok === true],
+    ['Admin order endpoint', state.requestStatus.adminOrders?.ok === true],
+    ['Redacted API evidence', isApiLogEnabled()]
   ];
   return checks.map(([label, pass]) => `<div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line)"><span>${label}</span>${statusBadge(pass ? 'READY' : 'FAILED')}</div>`).join('');
 }
 
-async function loadProducts(force = false) {
-  if (force || !state.products.length) state.products = await api.products();
+async function loadProducts(force = false, adminMode = false) {
+  if (force || !state.categories.length) state.categories = await api.categories();
+  const page = Number(state.productPage.page || 0);
+  const params = {
+    page,
+    size: Number(state.productPage.size || 12),
+    search: state.debouncedSearch,
+    categoryId: state.category === 'ALL' ? null : Number(state.category)
+  };
+  const response = adminMode ? await api.adminProductsPage(params) : await api.productsPage(params);
+  state.products = response.content || [];
+  state.productPage = response;
   return state.products;
 }
 
 async function renderProducts(container, adminMode = false, force = false) {
-  await loadProducts(force);
+  await loadProducts(force, adminMode);
   if (!adminMode && (force || !state.cart)) state.cart = await api.cart();
-  const categories = [...new Set(state.products.map((product) => product.categoryName).filter(Boolean))]
-    .sort((a, b) => englishCategoryName(a).localeCompare(englishCategoryName(b), 'en'));
-  const normalizedSearch = state.search.toLowerCase();
-  const filtered = state.products.filter((product) => {
-    const searchableText = [
-      product.productName,
-      englishProductName(product.productName),
-      product.description || '',
-      product.categoryName || '',
-      englishCategoryName(product.categoryName)
-    ].join(' ').toLowerCase();
-    const matchesSearch = searchableText.includes(normalizedSearch);
-    const matchesCategory = state.category === 'ALL' || product.categoryName === state.category;
-    return matchesSearch && matchesCategory;
-  });
-
+  const categories = productCategoryChoices();
   container.innerHTML = `
     <div class="toolbar">
       <div class="field"><input class="input" id="product-search" placeholder="Search name or description" value="${escapeHtml(state.search)}" data-testid="product-search" /></div>
-      <select class="select" id="category-filter" style="max-width:220px" data-testid="category-filter">
+      <select class="select" id="category-filter" style="max-width:260px" data-testid="category-filter">
         <option value="ALL">All categories</option>
-        ${categories.map((category) => `<option value="${escapeHtml(category)}" ${state.category === category ? 'selected' : ''}>${escapeHtml(englishCategoryName(category))}</option>`).join('')}
+        ${categories.map((category) => `<option value="${category.categoryId}" ${String(state.category) === String(category.categoryId) ? 'selected' : ''}>${escapeHtml(englishCategoryName(category.rawName))}</option>`).join('')}
       </select>
       ${adminMode ? '<button class="btn btn-primary" id="create-product" data-testid="create-product">+ New product</button>' : ''}
     </div>
-    ${filtered.length ? `<div class="products">${filtered.map((product) => {
-      const inCart = state.cart?.items?.find((item) => item.productId === product.productId)?.quantity || 0;
+    ${state.products.length ? `<div class="products">${state.products.map((product) => {
+      const inCart = state.cart?.items?.find((item) => Number(item.productId) === Number(product.productId))?.quantity || 0;
       const available = Math.max(0, Number(product.stock || 0) - inCart);
       return productCard(product, adminMode, available, inCart);
-    }).join('')}</div>` : `<div class="card">${empty('No products found', 'Adjust the search/filter or add products through the admin account.')}</div>`}`;
+    }).join('')}</div>` : `<div class="card">${empty('No products found', 'Adjust the search or category filter.')}</div>`}
+    ${paginationMarkup(state.productPage, 'products')}`;
 
   document.querySelector('#product-search').addEventListener('input', (event) => {
     state.search = event.target.value;
-    const cursor = event.target.selectionStart;
-    renderProducts(container, adminMode, false).then(() => {
-      const nextInput = document.querySelector('#product-search');
-      nextInput?.focus();
-      nextInput?.setSelectionRange(cursor, cursor);
-    });
+    clearTimeout(state.searchDebounceTimer);
+    state.searchDebounceTimer = setTimeout(() => {
+      state.debouncedSearch = state.search.trim();
+      state.productPage.page = 0;
+      renderProducts(container, adminMode, false).catch((error) => !error.cancelled && toast(error.message, 'error'));
+    }, 250);
   });
   document.querySelector('#category-filter').addEventListener('change', (event) => {
     state.category = event.target.value;
+    state.productPage.page = 0;
+    renderProducts(container, adminMode, false).catch((error) => !error.cancelled && toast(error.message, 'error'));
+  });
+  bindPagination(container, 'products', state.productPage, (page) => {
+    state.productPage.page = page;
     renderProducts(container, adminMode, false);
   });
-
   if (adminMode) bindAdminProductActions(container);
   else bindCustomerProductActions(container);
 }
 
 function productCard(product, adminMode, available = Number(product.stock || 0), inCart = 0) {
+  const active = normalizeName(product.status || 'ACTIVE') === 'ACTIVE';
   const image = product.image
     ? `<img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.productName)}" onerror="this.parentElement.innerHTML='No image'" />`
     : 'No image';
   return `
-    <article class="card product-card" data-testid="product-card-${product.productId}">
+    <article class="card product-card ${active ? '' : 'product-inactive'}" data-testid="product-card-${product.productId}">
       <div class="product-image">${image}</div>
       <div class="product-body">
-        <div><span class="badge badge-blue">${escapeHtml(englishCategoryName(product.categoryName || `Category ${product.categoryId}`))}</span></div>
+        <div><span class="badge badge-blue">${escapeHtml(englishCategoryName(product.categoryName || `Category ${product.categoryId}`))}</span>${adminMode ? ` ${statusBadge(product.status || 'ACTIVE')}` : ''}</div>
         <h3>${escapeHtml(englishProductName(product.productName))}</h3>
         <p>${escapeHtml(product.description || 'No description')}</p>
         <div class="product-meta"><span class="price">${money(product.price)}</span><span class="stock">${adminMode ? `Stock: ${escapeHtml(product.stock)}` : `Available: ${escapeHtml(available)}${inCart ? ` · In cart: ${escapeHtml(inCart)}` : ''}`}</span></div>
         ${adminMode ? `
           <div class="table-actions">
             <button class="btn btn-secondary btn-sm" data-edit-product="${product.productId}" data-testid="edit-product-${product.productId}">Edit</button>
-            <button class="btn btn-danger btn-sm" data-delete-product="${product.productId}" data-testid="delete-product-${product.productId}">Delete</button>
+            <button class="btn btn-danger btn-sm" data-delete-product="${product.productId}" data-testid="delete-product-${product.productId}" ${active ? '' : 'disabled'}>${active ? 'Deactivate' : 'Inactive'}</button>
           </div>` : `
           <div class="product-actions">
             <input class="input" type="number" min="1" max="${Math.max(1, available)}" value="1" id="qty-${product.productId}" aria-label="Quantity" data-testid="quantity-${product.productId}" ${available < 1 ? 'disabled' : ''} />
@@ -771,23 +889,22 @@ function bindCustomerProductActions(container) {
 }
 
 function bindAdminProductActions(container) {
-  document.querySelector('#create-product').addEventListener('click', () => openProductModal());
+  document.querySelector('#create-product')?.addEventListener('click', () => openProductModal());
   container.querySelectorAll('[data-edit-product]').forEach((button) => {
-    button.addEventListener('click', () => openProductModal(state.products.find((p) => p.productId === Number(button.dataset.editProduct))));
+    button.addEventListener('click', () => openProductModal(state.products.find((p) => Number(p.productId) === Number(button.dataset.editProduct))));
   });
   container.querySelectorAll('[data-delete-product]').forEach((button) => {
     button.addEventListener('click', async () => {
       const id = Number(button.dataset.deleteProduct);
-      const product = state.products.find((p) => p.productId === id);
-      if (!confirm(`Delete "${product?.productName || id}"? This calls the real DELETE endpoint.`)) return;
-      setBusy(button, true, 'Deleting...');
+      const product = state.products.find((p) => Number(p.productId) === id);
+      if (!confirm(`Deactivate "${product?.productName || id}"? It will disappear from the customer catalog and its Cloudinary image will be removed.`)) return;
+      setBusy(button, true, 'Deactivating...');
       try {
         const response = await api.deleteProduct(id);
-        toast(response.message || 'Product deleted.');
-        state.products = state.products.filter((p) => p.productId !== id);
-        renderProducts(container, true, false);
+        toast(response.message || 'Product deactivated.');
+        await renderProducts(container, true, true);
       } catch (error) {
-        toast(error.message, 'error');
+        if (!error.cancelled) toast(error.message, 'error');
         setBusy(button, false);
       }
     });
@@ -795,49 +912,89 @@ function bindAdminProductActions(container) {
 }
 
 function openProductModal(product = null) {
-  const config = getConfig();
   const categories = productCategoryChoices();
-  const selectedCategoryId = Number(product?.categoryId || config.categoryId);
-  const hasSelectedCategory = categories.some((category) => category.categoryId === selectedCategoryId);
-  const categoryControl = categories.length
-    ? `<select class="select" name="categoryId" required data-testid="product-category-id">
-        ${!hasSelectedCategory && selectedCategoryId > 0 ? `<option value="${selectedCategoryId}" selected>Category ID ${selectedCategoryId}</option>` : ''}
-        ${categories.map((category) => `<option value="${category.categoryId}" ${category.categoryId === selectedCategoryId ? 'selected' : ''}>${escapeHtml(englishCategoryName(category.rawName))}</option>`).join('')}
-      </select>`
-    : `<input class="input" type="number" min="1" name="categoryId" value="${escapeHtml(selectedCategoryId || 1)}" required data-testid="product-category-id" />`;
+  if (!categories.length) {
+    return toast('No categories were returned by GET /api/reference/categories. Create a category in the database before managing products.', 'error');
+  }
+  const selectedCategoryId = product ? Number(product.categoryId) : null;
   showModal({
     title: product ? 'Edit product' : 'Create product',
     body: `
       <form id="product-form" data-testid="product-form">
         <div class="form-grid">
-          <div class="field"><label>Category</label>${categoryControl}</div>
+          <div class="field"><label>Category</label><select class="select" name="categoryId" required data-testid="product-category-id">
+            <option value="" disabled ${selectedCategoryId === null ? 'selected' : ''}>Select a category</option>
+            ${categories.map((category) => `<option value="${category.categoryId}" ${category.categoryId === selectedCategoryId ? 'selected' : ''}>${escapeHtml(englishCategoryName(category.rawName))}</option>`).join('')}
+          </select></div>
           <div class="field"><label>Product name</label><input class="input" name="productName" value="${escapeHtml(product?.productName || '')}" required data-testid="product-name" /></div>
           <div class="field"><label>Price (VND)</label><input class="input" type="number" min="0" step="1" name="price" value="${escapeHtml(product?.price || 0)}" required data-testid="product-price" /></div>
           <div class="field"><label>Stock</label><input class="input" type="number" min="0" step="1" name="stock" value="${escapeHtml(product?.stock ?? 0)}" required data-testid="product-stock" /></div>
         </div>
         <div class="field" style="margin-top:14px"><label>Description</label><textarea class="textarea" name="description" data-testid="product-description">${escapeHtml(product?.description || '')}</textarea></div>
-        <div class="field" style="margin-top:14px"><label>Image file (optional for update)</label><input class="input" type="file" name="imageFile" accept="image/png,image/jpeg" data-testid="product-image" /></div>
-        <p class="help">Category names are displayed in English while the original backend category IDs remain unchanged. The form is sent as multipart/form-data and images are uploaded through Cloudinary.</p>
+        ${product?.image ? `<div class="field" style="margin-top:14px"><label>Current image</label><div class="selected-image-preview"><img src="${escapeHtml(product.image)}" alt="Current product" /><label><input type="checkbox" name="removeImage" value="true" id="remove-current-image" /> Remove current image</label></div></div>` : ''}
+        <div class="field" style="margin-top:14px"><label>${product ? 'Replacement image (optional)' : 'Product image (optional)'}</label><input class="input" type="file" name="imageFile" id="product-image-file" accept=".jpg,.jpeg,.png,image/jpeg,image/png" data-testid="product-image" /></div>
+        <div id="product-image-preview" class="selected-image-preview" hidden>
+          <img id="product-image-preview-img" alt="Selected product preview" />
+          <div id="product-image-file-details"></div>
+          <button class="btn btn-danger btn-sm" type="button" id="remove-selected-product-image">Remove selected file</button>
+        </div>
+        <p class="help">The browser validates MIME type, extension, and the 5 MB limit. The backend repeats validation using the actual file signature.</p>
       </form>`,
     footer: `<button class="btn btn-secondary" data-close-modal>Cancel</button><button class="btn btn-primary" id="save-product" data-testid="save-product">${product ? 'Save changes' : 'Create product'}</button>`
   });
+
+  const fileInput = document.querySelector('#product-image-file');
+  const preview = document.querySelector('#product-image-preview');
+  const previewImage = document.querySelector('#product-image-preview-img');
+  let previewUrl = '';
+  const clearSelectedFile = () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = '';
+    fileInput.value = '';
+    preview.hidden = true;
+    previewImage.removeAttribute('src');
+    document.querySelector('#product-image-file-details').innerHTML = '';
+  };
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files?.[0];
+    if (!file) return clearSelectedFile();
+    const validationError = validateImageFile(file, 'Product image');
+    if (validationError) {
+      clearSelectedFile();
+      return toast(validationError, 'error');
+    }
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = URL.createObjectURL(file);
+    previewImage.src = previewUrl;
+    document.querySelector('#product-image-file-details').innerHTML = fileDetailsMarkup(file);
+    preview.hidden = false;
+    const removeCurrent = document.querySelector('#remove-current-image');
+    if (removeCurrent) removeCurrent.checked = false;
+  });
+  document.querySelector('#remove-selected-product-image').addEventListener('click', clearSelectedFile);
+  document.querySelector('#remove-current-image')?.addEventListener('change', (event) => {
+    if (event.currentTarget.checked) clearSelectedFile();
+  });
+
   document.querySelector('#save-product').addEventListener('click', async (event) => {
     const form = document.querySelector('#product-form');
     if (!form.reportValidity()) return;
+    const file = fileInput.files?.[0];
+    const validationError = validateImageFile(file, 'Product image');
+    if (validationError) return toast(validationError, 'error');
     const formData = new FormData(form);
-    const file = formData.get('imageFile');
-    if (file && !file.size) formData.delete('imageFile');
+    if (!file) formData.delete('imageFile');
+    if (!document.querySelector('#remove-current-image')?.checked) formData.set('removeImage', 'false');
     setBusy(event.currentTarget, true, 'Saving...');
     try {
-      const saved = product ? await api.updateProduct(product.productId, formData) : await api.createProduct(formData);
+      await (product ? api.updateProduct(product.productId, formData) : api.createProduct(formData));
       toast(product ? 'Product updated.' : 'Product created.');
+      clearSelectedFile();
       closeModal();
-      const index = state.products.findIndex((p) => p.productId === saved.productId);
-      if (index >= 0) state.products[index] = saved;
-      else state.products.unshift(saved);
-      renderCurrentView();
+      state.productPage.page = 0;
+      await renderCurrentView(true);
     } catch (error) {
-      toast(error.message, 'error');
+      if (!error.cancelled) toast(error.message, 'error');
       setBusy(event.currentTarget, false);
     }
   });
@@ -848,7 +1005,7 @@ async function renderCart(container, force = false) {
   const items = state.cart?.items || [];
   container.innerHTML = `
     <section class="card">
-      <div class="card-header"><div><h3>Cart items</h3><p>POST adds, PUT replaces quantity, DELETE removes by cartItemId</p></div><strong>${money(state.cart?.totalCartPrice)}</strong></div>
+      <div class="card-header"><div><h3>Cart items</h3><p>Update quantities, remove individual products, or clear the cart after confirmation.</p></div><div class="table-actions"><strong>${money(state.cart?.totalCartPrice)}</strong>${items.length ? '<button class="btn btn-danger btn-sm" id="clear-cart" data-testid="clear-cart">Clear Cart</button>' : ''}</div></div>
       ${items.length ? `
         <div class="table-wrap"><table>
           <thead><tr><th>Product</th><th>Unit price</th><th>Quantity</th><th>Subtotal</th><th>Actions</th></tr></thead>
@@ -877,10 +1034,11 @@ async function renderCart(container, force = false) {
       state.cart = await api.updateCartItem(productId, quantity);
       state.checkoutPreview = null;
       state.checkoutPreviewVoucher = null;
+      state.checkoutIdempotencyKey = null;
       toast('Cart quantity updated.');
       renderCart(container, false);
     } catch (error) {
-      toast(error.message, 'error');
+      if (!error.cancelled) toast(error.message, 'error');
       setBusy(button, false);
     }
   }));
@@ -893,13 +1051,29 @@ async function renderCart(container, force = false) {
       state.cart = await api.removeCartItem(cartItemId);
       state.checkoutPreview = null;
       state.checkoutPreviewVoucher = null;
+      state.checkoutIdempotencyKey = null;
       toast('Cart item removed.');
       renderCart(container, false);
     } catch (error) {
-      toast(error.message, 'error');
+      if (!error.cancelled) toast(error.message, 'error');
       setBusy(button, false);
     }
   }));
+  document.querySelector('#clear-cart')?.addEventListener('click', async (event) => {
+    if (!confirm(`Clear all ${items.length} distinct product(s) from the cart? This action cannot be undone.`)) return;
+    setBusy(event.currentTarget, true, 'Clearing...');
+    try {
+      state.cart = await api.clearCart();
+      state.checkoutPreview = null;
+      state.checkoutPreviewVoucher = null;
+      state.checkoutIdempotencyKey = null;
+      toast('Cart cleared.');
+      renderCart(container, false);
+    } catch (error) {
+      if (!error.cancelled) toast(error.message, 'error');
+      setBusy(event.currentTarget, false);
+    }
+  });
   document.querySelector('#go-checkout')?.addEventListener('click', () => {
     state.view = 'checkout';
     renderShell();
@@ -1054,11 +1228,8 @@ async function renderProfile(container, force = false) {
 
 function paymentMethodHelp(methodName) {
   return normalizeName(methodName) === 'QR_CODE'
-    ? `<div class="payment-help qr payment-help-with-qr">
-        <img src="${paymentQrAsset}" alt="MB VietQR payment" class="payment-help-qr" />
-        <div><strong>QR online payment</strong><p>Scan the configured MB VietQR for ${PAYMENT_QR_ACCOUNT_NAME} (${PAYMENT_QR_ACCOUNT_NUMBER}). Use the order code as the transfer note, then upload the payment receipt for Admin verification.</p></div>
-      </div>`
-    : '<div class="payment-help cod"><strong>Cash on delivery (COD)</strong><p>Pay the courier when the order arrives. The order and payment remain PENDING until the delivery workflow is completed.</p></div>';
+    ? '<div class="payment-help qr"><strong>QR online payment</strong><p>After the order is created, the backend generates a unique VietQR using the exact order total and order code. Bank details are supplied by the backend, not hardcoded in this browser.</p></div>'
+    : '<div class="payment-help cod"><strong>Cash on delivery (COD)</strong><p>Pay the courier when the order arrives. The order remains PENDING until the delivery workflow is completed.</p></div>';
 }
 
 function paymentMethodLabel(methodName) {
@@ -1079,11 +1250,6 @@ async function renderCheckout(container, force = false) {
     .map((method) => ({ ...method, methodName: canonicalPaymentMethodName(method.methodName) }))
     .filter((method) => Number(method.paymentMethodId) > 0 && ['COD', 'QR_CODE'].includes(method.methodName));
 
-  const initialAddressMode = state.addresses.length ? 'saved' : 'manual';
-  const initialPaymentMethod = state.paymentMethods.find((method) => method.methodName === 'COD')
-    || state.paymentMethods.find((method) => method.methodName === 'QR_CODE')
-    || state.paymentMethods[0];
-
   if (!cart.items?.length) {
     container.innerHTML = `<div class="card">${empty('Checkout require at least one cart item', 'Add at least one product to the cart before opening checkout.')}</div>`;
     return;
@@ -1093,73 +1259,41 @@ async function renderCheckout(container, force = false) {
     return;
   }
 
+  const initialAddressMode = state.addresses.length ? 'saved' : 'manual';
+  const initialPaymentMethod = state.paymentMethods.find((method) => method.methodName === 'COD')
+    || state.paymentMethods.find((method) => method.methodName === 'QR_CODE')
+    || state.paymentMethods[0];
+  if (!state.checkoutIdempotencyKey) state.checkoutIdempotencyKey = createIdempotencyKey();
+
   container.innerHTML = `
     <div class="grid grid-2">
       <section class="card card-pad">
         <h3 style="margin-top:0">Order details</h3>
         <form id="checkout-form" data-testid="checkout-form">
-          <fieldset class="address-mode-group">
-            <legend>Delivery address</legend>
+          <fieldset class="address-mode-group"><legend>Delivery address</legend>
             <div class="address-mode-options" role="radiogroup" aria-label="Delivery address source">
-              <label class="address-mode-option ${state.addresses.length ? '' : 'disabled'}">
-                <input type="radio" name="addressMode" value="saved" ${initialAddressMode === 'saved' ? 'checked' : ''} ${state.addresses.length ? '' : 'disabled'} data-testid="address-mode-saved" />
-                <span><strong>Choose a saved address</strong><small>Select one of the addresses from your account.</small></span>
-              </label>
-              <label class="address-mode-option">
-                <input type="radio" name="addressMode" value="manual" ${initialAddressMode === 'manual' ? 'checked' : ''} data-testid="address-mode-manual" />
-                <span><strong>Enter an address manually</strong><small>Type the delivery details directly during checkout.</small></span>
-              </label>
+              <label class="address-mode-option ${state.addresses.length ? '' : 'disabled'}"><input type="radio" name="addressMode" value="saved" ${initialAddressMode === 'saved' ? 'checked' : ''} ${state.addresses.length ? '' : 'disabled'} data-testid="address-mode-saved" /><span><strong>Choose a saved address</strong><small>Select one of the addresses from your account.</small></span></label>
+              <label class="address-mode-option"><input type="radio" name="addressMode" value="manual" ${initialAddressMode === 'manual' ? 'checked' : ''} data-testid="address-mode-manual" /><span><strong>Enter an address manually</strong><small>The address is saved only as an immutable snapshot inside the order.</small></span></label>
             </div>
           </fieldset>
+          <div id="saved-address-panel" class="checkout-address-panel"><div class="field"><label>Saved address</label><select class="select" name="addressId" data-testid="checkout-address"><option value="">Select address</option>${state.addresses.map((a) => `<option value="${a.addressId}" ${a.isDefault ? 'selected' : ''}>${escapeHtml(a.receiverName)} — ${escapeHtml(a.street)}, ${escapeHtml(a.ward)}, ${escapeHtml(a.district)}, ${escapeHtml(a.province)}</option>`).join('')}</select></div></div>
+          <div id="manual-address-panel" class="checkout-address-panel" hidden><div class="form-grid">
+            <div class="field"><label>Receiver name</label><input class="input" name="manualReceiverName" maxlength="100" autocomplete="name" data-testid="checkout-manual-receiver-name" /></div>
+            <div class="field"><label>Vietnamese phone</label><input class="input" id="checkout-manual-phone" name="manualReceiverPhone" type="tel" inputmode="tel" maxlength="12" pattern="${VIETNAM_PHONE_PATTERN}" autocomplete="tel" placeholder="0912345678 or +84912345678" data-testid="checkout-manual-phone" /></div>
+            <div class="field"><label>Province / City</label><input class="input" name="manualProvince" maxlength="100" data-testid="checkout-manual-province" /></div>
+            <div class="field"><label>District</label><input class="input" name="manualDistrict" maxlength="100" data-testid="checkout-manual-district" /></div>
+            <div class="field"><label>Ward</label><input class="input" name="manualWard" maxlength="100" data-testid="checkout-manual-ward" /></div>
+            <div class="field"><label>Street / House number</label><input class="input" name="manualStreet" maxlength="255" data-testid="checkout-manual-street" /></div>
+          </div><p class="help checkout-address-note">If checkout fails, no standalone Address row is left behind.</p></div>
 
-          <div id="saved-address-panel" class="checkout-address-panel">
-            <div class="field">
-              <label>Saved address</label>
-              <select class="select" name="addressId" data-testid="checkout-address">
-                <option value="">Select address</option>
-                ${state.addresses.map((a) => `<option value="${a.addressId}" ${a.isDefault ? 'selected' : ''}>${escapeHtml(a.receiverName)} — ${escapeHtml(a.street)}, ${escapeHtml(a.ward)}, ${escapeHtml(a.district)}, ${escapeHtml(a.province)}</option>`).join('')}
-              </select>
-            </div>
-          </div>
-
-          <div id="manual-address-panel" class="checkout-address-panel" hidden>
-            <div class="form-grid">
-              <div class="field"><label>Receiver name</label><input class="input" name="manualReceiverName" maxlength="100" autocomplete="name" data-testid="checkout-manual-receiver-name" /></div>
-              <div class="field"><label>Vietnamese phone</label><input class="input" id="checkout-manual-phone" name="manualReceiverPhone" type="tel" inputmode="tel" maxlength="12" pattern="${VIETNAM_PHONE_PATTERN}" autocomplete="tel" placeholder="0912345678 or +84912345678" data-testid="checkout-manual-phone" /></div>
-              <div class="field"><label>Province / City</label><input class="input" name="manualProvince" maxlength="100" autocomplete="address-level1" data-testid="checkout-manual-province" /></div>
-              <div class="field"><label>District</label><input class="input" name="manualDistrict" maxlength="100" autocomplete="address-level2" data-testid="checkout-manual-district" /></div>
-              <div class="field"><label>Ward</label><input class="input" name="manualWard" maxlength="100" autocomplete="address-level3" data-testid="checkout-manual-ward" /></div>
-              <div class="field"><label>Street / House number</label><input class="input" name="manualStreet" maxlength="255" autocomplete="street-address" data-testid="checkout-manual-street" /></div>
-            </div>
-            <p class="help checkout-address-note">The backend stores this address so it remains attached to the order history.</p>
-          </div>
-
-          <fieldset class="address-mode-group payment-method-group" style="margin-top:14px">
-            <legend>Payment method</legend>
-            <div class="address-mode-options payment-method-options" role="radiogroup" aria-label="Payment method">
-              ${state.paymentMethods.map((method) => {
-                const [label, help] = paymentMethodLabel(method.methodName);
-                return `<label class="address-mode-option">
-                  <input type="radio" name="paymentMethodId" value="${method.paymentMethodId}" ${Number(method.paymentMethodId) === Number(initialPaymentMethod.paymentMethodId) ? 'checked' : ''} data-method-name="${escapeHtml(method.methodName)}" data-testid="payment-method-${method.methodName.toLowerCase()}" />
-                  <span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(help)}</small></span>
-                </label>`;
-              }).join('')}
-            </div>
-          </fieldset>
+          <fieldset class="address-mode-group payment-method-group"><legend>Payment method</legend><div class="address-mode-options payment-method-options" role="radiogroup" aria-label="Payment method">${state.paymentMethods.map((method) => { const [label, help] = paymentMethodLabel(method.methodName); return `<label class="address-mode-option"><input type="radio" name="paymentMethodId" value="${method.paymentMethodId}" ${Number(method.paymentMethodId) === Number(initialPaymentMethod.paymentMethodId) ? 'checked' : ''} data-method-name="${escapeHtml(method.methodName)}" data-testid="payment-method-${method.methodName.toLowerCase()}" /><span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(help)}</small></span></label>`; }).join('')}</div></fieldset>
           <div id="payment-method-help">${paymentMethodHelp(initialPaymentMethod.methodName)}</div>
-          <div class="field" style="margin-top:14px">
-            <label>Voucher code</label>
-            <input class="input" name="voucherCode" id="checkout-voucher" value="${escapeHtml(state.checkoutVoucher)}" placeholder="Optional" autocomplete="off" data-testid="checkout-voucher" />
-            <p class="help">The backend price preview appears automatically and refreshes whenever the voucher changes.</p>
-          </div>
+          <div class="field" style="margin-top:14px"><label>Voucher code</label><input class="input" name="voucherCode" id="checkout-voucher" value="${escapeHtml(state.checkoutVoucher)}" placeholder="Optional" autocomplete="off" data-testid="checkout-voucher" /><p class="help">Price preview updates automatically after you stop typing.</p></div>
           <div class="field" style="margin-top:14px"><label>Order note</label><textarea class="textarea" name="note" maxlength="500" data-testid="checkout-note"></textarea></div>
           <button class="btn btn-primary" type="submit" style="width:100%;margin-top:18px" data-testid="place-order" disabled>Place order</button>
         </form>
       </section>
-      <section class="card">
-        <div class="card-header"><div><h3>Price preview</h3><p>Automatically calculated by the backend</p></div></div>
-        <div id="preview-panel">${loading('Calculating the current cart price...')}</div>
-      </section>
+      <section class="card"><div class="card-header"><div><h3>Price preview</h3><p>Automatically recalculated using current product prices and stock</p></div></div><div id="preview-panel">${loading('Calculating the current cart price...')}</div></section>
     </div>`;
 
   const checkoutForm = document.querySelector('#checkout-form');
@@ -1169,150 +1303,106 @@ async function renderCheckout(container, force = false) {
   const voucherInput = document.querySelector('#checkout-voucher');
   const previewPanel = document.querySelector('#preview-panel');
   const placeOrderButton = checkoutForm.querySelector('[data-testid="place-order"]');
-  const manualAddressInputs = [
-    checkoutForm.elements.manualReceiverName,
-    checkoutForm.elements.manualReceiverPhone,
-    checkoutForm.elements.manualProvince,
-    checkoutForm.elements.manualDistrict,
-    checkoutForm.elements.manualWard,
-    checkoutForm.elements.manualStreet
-  ];
-  let previewTimer = null;
+  const manualInputs = ['manualReceiverName','manualReceiverPhone','manualProvince','manualDistrict','manualWard','manualStreet'].map((name) => checkoutForm.elements[name]);
   let previewSequence = 0;
 
-  function setCheckoutAddressMode(mode) {
-    const useManual = mode === 'manual';
-    savedAddressPanel.hidden = useManual;
-    manualAddressPanel.hidden = !useManual;
-    savedAddressSelect.disabled = useManual;
-    savedAddressSelect.required = !useManual;
-    manualAddressInputs.forEach((input) => {
-      input.disabled = !useManual;
-      input.required = useManual;
-    });
+  function resetCheckoutIdentity() { state.checkoutIdempotencyKey = createIdempotencyKey(); }
+  function setAddressMode(mode) {
+    const manual = mode === 'manual';
+    savedAddressPanel.hidden = manual;
+    manualAddressPanel.hidden = !manual;
+    savedAddressSelect.disabled = manual;
+    savedAddressSelect.required = !manual;
+    manualInputs.forEach((input) => { input.disabled = !manual; input.required = manual; });
+    resetCheckoutIdentity();
   }
-
-  async function refreshAutomaticPreview() {
-    const requestedVoucher = voucherInput.value.trim();
-    const requestSequence = ++previewSequence;
-    state.checkoutVoucher = requestedVoucher;
+  async function refreshPreview() {
+    const voucher = voucherInput.value.trim();
+    const sequence = ++previewSequence;
+    state.checkoutVoucher = voucher;
     state.checkoutPreview = null;
     state.checkoutPreviewVoucher = null;
     placeOrderButton.disabled = true;
-    previewPanel.innerHTML = loading(requestedVoucher ? `Checking voucher ${requestedVoucher}...` : 'Calculating the current cart price...');
-
+    previewPanel.innerHTML = loading(voucher ? `Checking voucher ${voucher}...` : 'Calculating current prices...');
     try {
-      const preview = await api.previewOrder(requestedVoucher);
-      if (requestSequence !== previewSequence) return;
+      const preview = await api.previewOrder(voucher);
+      if (sequence !== previewSequence || state.view !== 'checkout') return;
       state.checkoutPreview = preview;
-      state.checkoutPreviewVoucher = requestedVoucher;
+      state.checkoutPreviewVoucher = voucher;
       previewPanel.innerHTML = previewMarkup(preview);
       placeOrderButton.disabled = false;
     } catch (error) {
-      if (requestSequence !== previewSequence || error.authExpired) return;
+      if (sequence !== previewSequence || error.cancelled || error.authExpired) return;
       previewPanel.innerHTML = `<div class="card-pad">${empty('Price preview unavailable', error.message)}</div>`;
       placeOrderButton.disabled = true;
     }
   }
 
-  setCheckoutAddressMode(initialAddressMode);
+  setAddressMode(initialAddressMode);
   bindPhoneOnlyInput(document.querySelector('#checkout-manual-phone'));
-
-  checkoutForm.querySelectorAll('input[name="addressMode"]').forEach((radio) => {
-    radio.addEventListener('change', (event) => setCheckoutAddressMode(event.target.value));
-  });
-  checkoutForm.querySelectorAll('input[name="paymentMethodId"]').forEach((radio) => {
-    radio.addEventListener('change', (event) => {
-      document.querySelector('#payment-method-help').innerHTML = paymentMethodHelp(event.target.dataset.methodName);
-    });
-  });
+  checkoutForm.querySelectorAll('input[name="addressMode"]').forEach((radio) => radio.addEventListener('change', (event) => setAddressMode(event.target.value)));
+  checkoutForm.querySelectorAll('input[name="paymentMethodId"]').forEach((radio) => radio.addEventListener('change', (event) => { document.querySelector('#payment-method-help').innerHTML = paymentMethodHelp(event.target.dataset.methodName); resetCheckoutIdentity(); }));
+  checkoutForm.addEventListener('input', (event) => { if (event.target.id !== 'checkout-voucher') resetCheckoutIdentity(); });
   voucherInput.addEventListener('input', () => {
-    clearTimeout(previewTimer);
+    clearTimeout(state.checkoutPreviewTimer);
     ++previewSequence;
     state.checkoutVoucher = voucherInput.value.trim();
     state.checkoutPreview = null;
     state.checkoutPreviewVoucher = null;
+    resetCheckoutIdentity();
     placeOrderButton.disabled = true;
     previewPanel.innerHTML = loading('Updating voucher price...');
-    previewTimer = setTimeout(refreshAutomaticPreview, 450);
+    state.checkoutPreviewTimer = setTimeout(refreshPreview, 300);
   });
 
   checkoutForm.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (!event.currentTarget.reportValidity()) return;
     const data = new FormData(event.currentTarget);
-    const currentVoucher = String(data.get('voucherCode') || '').trim();
-    if (!state.checkoutPreview || state.checkoutPreviewVoucher !== currentVoucher) {
-      await refreshAutomaticPreview();
-      if (!state.checkoutPreview || state.checkoutPreviewVoucher !== currentVoucher) {
-        return toast('Wait for a valid automatic price preview before placing the order.', 'error', 'Price not ready');
-      }
+    const voucher = String(data.get('voucherCode') || '').trim();
+    if (!state.checkoutPreview || state.checkoutPreviewVoucher !== voucher) {
+      await refreshPreview();
+      if (!state.checkoutPreview || state.checkoutPreviewVoucher !== voucher) return toast('Wait for a valid automatic price preview.', 'error', 'Price not ready');
     }
-
-    const addressMode = data.get('addressMode');
     const paymentMethodId = Number(data.get('paymentMethodId'));
     const paymentMethod = state.paymentMethods.find((method) => Number(method.paymentMethodId) === paymentMethodId);
     if (!paymentMethod) return toast('Choose a valid COD or QR payment method returned by the backend.', 'error');
-    const isQr = paymentMethod.methodName === 'QR_CODE';
-    const methodLabel = isQr ? 'QR online payment' : 'cash on delivery';
-    const addressLabel = addressMode === 'manual' ? 'the manually entered address' : 'the selected saved address';
-    if (!confirm(`Create this order using ${addressLabel} and ${methodLabel}? Stock will be deducted by the backend and the cart will be cleared.`)) return;
-
-    setBusy(event.submitter, true, addressMode === 'manual' ? 'Saving address...' : 'Creating order...');
-    try {
-      let addressId;
-      if (addressMode === 'manual') {
-        const receiverPhone = sanitizePhoneValue(data.get('manualReceiverPhone'));
-        if (!isValidVietnamPhone(receiverPhone)) {
-          throw new Error('Phone must be 0xxxxxxxxx or +84xxxxxxxxx.');
-        }
-        const createdAddress = await api.createAddress({
-          receiverName: String(data.get('manualReceiverName') || '').trim(),
-          receiverPhone,
-          province: String(data.get('manualProvince') || '').trim(),
-          district: String(data.get('manualDistrict') || '').trim(),
-          ward: String(data.get('manualWard') || '').trim(),
-          street: String(data.get('manualStreet') || '').trim(),
-          isDefault: false
-        });
-        addressId = Number(createdAddress.addressId);
-        if (!Number.isInteger(addressId) || addressId <= 0) {
-          throw new Error('The backend did not return a valid address ID.');
-        }
-        state.addresses.push(createdAddress);
-        setBusy(event.submitter, true, 'Creating order...');
-      } else {
-        addressId = Number(data.get('addressId'));
-      }
-
-      const payload = {
-        addressId,
-        paymentMethodId,
-        voucherCode: currentVoucher || null,
-        note: String(data.get('note') || '').trim()
+    const addressMode = String(data.get('addressMode'));
+    const payload = { paymentMethodId, voucherCode: voucher || null, note: String(data.get('note') || '').trim(), addressId: null, manualAddress: null };
+    if (addressMode === 'manual') {
+      const phone = sanitizePhoneValue(data.get('manualReceiverPhone'));
+      if (!isValidVietnamPhone(phone)) return toast('Phone must be 0xxxxxxxxx or +84xxxxxxxxx.', 'error');
+      payload.manualAddress = {
+        receiverName: String(data.get('manualReceiverName') || '').trim(), receiverPhone: phone,
+        province: String(data.get('manualProvince') || '').trim(), district: String(data.get('manualDistrict') || '').trim(),
+        ward: String(data.get('manualWard') || '').trim(), street: String(data.get('manualStreet') || '').trim()
       };
-      const order = await api.checkout(payload);
-      state.cart = null;
-      state.products = [];
-      state.orders = [];
-      state.checkoutPreview = null;
-      state.checkoutPreviewVoucher = null;
-      state.checkoutVoucher = '';
+    } else {
+      payload.addressId = Number(data.get('addressId'));
+      if (!Number.isInteger(payload.addressId) || payload.addressId <= 0) return toast('Choose a saved delivery address.', 'error');
+    }
+    const isQr = paymentMethod.methodName === 'QR_CODE';
+    if (!confirm(`Place this ${isQr ? 'QR online payment' : 'cash on delivery'} order? Current product prices and stock will be checked again by the backend.`)) return;
+    setBusy(event.submitter, true, 'Creating order...');
+    try {
+      const key = state.checkoutIdempotencyKey || createIdempotencyKey();
+      state.checkoutIdempotencyKey = key;
+      const order = await api.checkout(payload, key);
+      state.cart = null; state.products = []; state.orders = [];
+      state.checkoutPreview = null; state.checkoutPreviewVoucher = null; state.checkoutVoucher = '';
+      state.checkoutIdempotencyKey = null;
       state.view = 'orders';
       renderShell();
       if (isQr) {
-        toast(`Order ${order.orderCode} created. Scan the QR and upload the receipt.`);
+        toast(`Order ${order.orderCode} created. Scan the order-specific QR and upload the receipt.`);
         setTimeout(() => openPaymentQrModal(order.orderId), 0);
-      } else {
-        setTimeout(() => openCodOrderSuccessModal(order), 0);
-      }
+      } else setTimeout(() => openCodOrderSuccessModal(order), 0);
     } catch (error) {
-      toast(error.message, 'error', 'Checkout failed');
+      if (!error.cancelled) toast(error.message, 'error', 'Checkout failed');
       setBusy(event.submitter, false);
     }
   });
-
-  await refreshAutomaticPreview();
+  await refreshPreview();
 }
 
 function previewMarkup(preview) {
@@ -1346,106 +1436,86 @@ function openCodOrderSuccessModal(order) {
   document.querySelector('#view-cod-order')?.addEventListener('click', closeModal);
 }
 
-function paymentQrDetailsMarkup({ orderCode = '', amount = null, paymentStatus = '', adminView = false } = {}) {
-  const transferNote = orderCode || 'Use the order code shown in the order details';
-  return `<div class="payment-qr payment-qr-configured">
-    <img src="${paymentQrAsset}" alt="MB VietQR payment for ${escapeHtml(transferNote)}" data-testid="payment-qr-image" />
-    <div>
-      ${paymentStatus ? `<span class="badge badge-blue">${escapeHtml(paymentStatus)}</span>` : '<span class="badge badge-blue">MB VIETQR</span>'}
-      <h3>${escapeHtml(orderCode || 'Configured payment QR')}</h3>
-      ${amount !== null && amount !== undefined ? `<p class="qr-amount">${money(amount)}</p>` : ''}
-      <div class="qr-bank-details">
-        <div><span>Bank</span><strong>${PAYMENT_QR_BANK}</strong></div>
-        <div><span>Account name</span><strong>${PAYMENT_QR_ACCOUNT_NAME}</strong></div>
-        <div><span>Account number</span><strong>${PAYMENT_QR_ACCOUNT_NUMBER}</strong></div>
-        <div><span>Transfer note</span><strong>${escapeHtml(transferNote)}</strong></div>
-      </div>
-      <p class="help">${adminView ? 'This is the same configured payment QR shown to Customers. Review the uploaded receipt separately before verifying payment.' : 'Scan this QR, enter the exact order total when required, and use the order code as the transfer note. Then upload the payment receipt.'}</p>
-    </div>
-  </div>`;
+function paymentQrDetailsMarkup(info, imageUrl, adminView = false) {
+  return `<div class="payment-qr"><img src="${escapeHtml(imageUrl)}" alt="Order-specific VietQR for ${escapeHtml(info.orderCode)}" data-testid="payment-qr-image" /><div>
+    ${statusBadge(info.paymentStatus || 'AWAITING_PAYMENT', 'Payment')}
+    <h3>${escapeHtml(info.orderCode)}</h3><p class="qr-amount">${money(info.amount)}</p>
+    <div class="qr-bank-details"><div><span>Bank</span><strong>${escapeHtml(info.bankName || info.bankId || 'Configured by backend')}</strong></div><div><span>Account name</span><strong>${escapeHtml(info.accountName || 'Configured by backend')}</strong></div><div><span>Account number</span><strong>${escapeHtml(info.accountNumber || 'Configured by backend')}</strong></div><div><span>Transfer note</span><strong>${escapeHtml(info.transferNote || info.orderCode)}</strong></div></div>
+    <p class="help">${adminView ? 'This QR was generated by the backend for this exact order amount and transfer note. Review the protected receipt separately before verification.' : 'Scan this order-specific QR. The amount and transfer note are already encoded by the backend, then upload your receipt.'}</p>
+  </div></div>`;
 }
 
-function openConfiguredPaymentQrModal({ orderCode = '', amount = null, paymentStatus = '', adminView = false, title = 'Configured QR payment' } = {}) {
-  showModal({
-    title,
-    large: true,
-    body: paymentQrDetailsMarkup({ orderCode, amount, paymentStatus, adminView }),
-    footer: '<button class="btn btn-secondary" data-close-modal>Close</button>'
-  });
+async function openConfiguredPaymentQrModal({ orderId, adminView = false, title = 'Order payment QR' } = {}) {
+  showModal({ title, large: true, body: `<div id="payment-qr-content">${loading('Generating order-specific QR...')}</div>`, footer: '<button class="btn btn-secondary" data-close-modal>Close</button>' });
+  try {
+    const [info, blob] = await Promise.all([
+      adminView ? api.adminPaymentQrInfo(orderId) : api.paymentQrInfo(orderId),
+      adminView ? api.adminPaymentQrCode(orderId) : api.paymentQrCode(orderId)
+    ]);
+    const modal = document.querySelector('#active-modal');
+    if (!modal) return;
+    const objectUrl = URL.createObjectURL(blob);
+    modal.dataset.objectUrl = objectUrl;
+    document.querySelector('#payment-qr-content').innerHTML = paymentQrDetailsMarkup(info, objectUrl, adminView);
+  } catch (error) {
+    const content = document.querySelector('#payment-qr-content');
+    if (content && !error.cancelled) content.innerHTML = `<div class="empty"><strong>Unable to load payment QR</strong>${escapeHtml(error.message)}</div>`;
+  }
 }
 
-function openPaymentQrModal(orderId) {
-  showModal({
-    title: `QR payment for order #${orderId}`,
-    large: true,
-    body: `<div id="payment-qr-content">${loading('Loading payment details...')}</div>`,
-    footer: '<button class="btn btn-secondary" data-close-modal>Close</button><button class="btn btn-primary" id="payment-upload-receipt" data-testid="payment-upload-receipt">Upload payment receipt</button>'
-  });
-  document.querySelector('#payment-upload-receipt').addEventListener('click', () => {
-    closeModal();
-    openQrModal(orderId);
-  });
-
-  api.paymentQrInfo(orderId)
-    .then((info) => {
-      const modal = document.querySelector('#active-modal');
-      if (!modal) return;
-      document.querySelector('#payment-qr-content').innerHTML = paymentQrDetailsMarkup({
-        orderCode: info.orderCode,
-        amount: info.amount,
-        paymentStatus: info.paymentStatus
-      });
-      if (String(info.paymentStatus).toUpperCase() === 'PAID') {
-        document.querySelector('#payment-upload-receipt')?.remove();
-      }
-    })
-    .catch((error) => {
-      const content = document.querySelector('#payment-qr-content');
-      if (content) content.innerHTML = `<div class="empty"><strong>Unable to load QR payment</strong>${escapeHtml(error.message)}</div>`;
-    });
+async function openPaymentQrModal(orderId) {
+  showModal({ title: `QR payment for order #${orderId}`, large: true, body: `<div id="payment-qr-content">${loading('Generating order-specific QR...')}</div>`, footer: '<button class="btn btn-secondary" data-close-modal>Close</button><button class="btn btn-primary" id="payment-upload-receipt" data-testid="payment-upload-receipt">Upload payment receipt</button>' });
+  document.querySelector('#payment-upload-receipt')?.addEventListener('click', () => { closeModal(); openQrModal(orderId); });
+  try {
+    const [info, blob] = await Promise.all([api.paymentQrInfo(orderId), api.paymentQrCode(orderId)]);
+    const modal = document.querySelector('#active-modal');
+    if (!modal) return;
+    const objectUrl = URL.createObjectURL(blob);
+    modal.dataset.objectUrl = objectUrl;
+    document.querySelector('#payment-qr-content').innerHTML = paymentQrDetailsMarkup(info, objectUrl, false);
+    if (normalizeName(info.paymentStatus) === 'PAID') document.querySelector('#payment-upload-receipt')?.remove();
+  } catch (error) {
+    const content = document.querySelector('#payment-qr-content');
+    if (content && !error.cancelled) content.innerHTML = `<div class="empty"><strong>Unable to load QR payment</strong>${escapeHtml(error.message)}</div>`;
+  }
 }
 
 async function renderOrders(container, force = false) {
-  if (force || !state.orders.length) state.orders = await api.orders();
+  if (force || !state.orders.length) {
+    const page = await api.ordersPage(state.ordersPage);
+    state.orders = page.content || [];
+    state.ordersPage = { page: page.page, size: page.size, totalElements: page.totalElements, totalPages: page.totalPages };
+  }
   stopPaymentPolling();
-  container.innerHTML = `
-    <div class="toolbar" style="justify-content:flex-end"><button class="btn btn-secondary" id="refresh-payment-status" data-testid="refresh-payment-status">↻ Refresh payment status</button></div>
-    <div class="grid">${state.orders.length ? state.orders.map(orderCard).join('') : `<div class="card">${empty('No order history', 'Complete checkout to create an order.')}</div>`}</div>`;
-  document.querySelector('#refresh-payment-status').addEventListener('click', async (event) => {
-    setBusy(event.currentTarget, true, 'Refreshing...');
-    try {
-      state.orders = await api.orders();
-      await renderOrders(container, false);
-      toast('Order and payment statuses refreshed.');
-    } catch (error) {
-      if (!error.authExpired) toast(error.message, 'error');
-      setBusy(event.currentTarget, false);
-    }
-  });
+  container.innerHTML = `<div class="toolbar" style="justify-content:flex-end"><button class="btn btn-secondary" id="refresh-payment-status" data-testid="refresh-payment-status">↻ Refresh payment status</button></div><div class="grid">${state.orders.length ? state.orders.map(orderCard).join('') : `<div class="card">${empty('No order history', 'Complete checkout to create an order.')}</div>`}</div>${paginationMarkup(state.ordersPage, 'orders')}`;
+  bindPagination(container, 'orders', state.ordersPage, async (page) => { state.ordersPage.page = page; state.orders = []; await renderOrders(container, true); });
+  document.querySelector('#refresh-payment-status')?.addEventListener('click', async (event) => { setBusy(event.currentTarget, true, 'Refreshing...'); try { state.orders=[]; await renderOrders(container, true); toast('Order and payment statuses refreshed.'); } catch (error) { if (!error.authExpired && !error.cancelled) toast(error.message, 'error'); setBusy(event.currentTarget, false); } });
   container.querySelectorAll('[data-show-payment-qr]').forEach((button) => button.addEventListener('click', () => openPaymentQrModal(Number(button.dataset.showPaymentQr))));
   container.querySelectorAll('[data-upload-qr]').forEach((button) => button.addEventListener('click', () => openQrModal(Number(button.dataset.uploadQr))));
-  container.querySelectorAll('[data-view-receipt]').forEach((button) => button.addEventListener('click', () => {
-    const order = state.orders.find((item) => Number(item.orderId) === Number(button.dataset.viewReceipt));
-    openReceiptModal(order?.receiptUrl, order?.orderCode);
-  }));
+  container.querySelectorAll('[data-view-receipt]').forEach((button) => button.addEventListener('click', () => openReceiptModal(Number(button.dataset.viewReceipt), false)));
 
   if (state.orders.some((order) => normalizeName(order.paymentStatus) === 'PENDING_VERIFICATION')) {
     let polling = false;
+    state.paymentPollFailures = 0;
     state.paymentPollTimer = setInterval(async () => {
       if (polling || state.view !== 'orders') return;
       polling = true;
       try {
         const previousPaid = new Set(state.orders.filter((order) => normalizeName(order.paymentStatus) === 'PAID').map((order) => order.orderId));
-        const freshOrders = await api.orders();
-        const newlyPaid = freshOrders.find((order) => normalizeName(order.paymentStatus) === 'PAID' && !previousPaid.has(order.orderId));
-        state.orders = freshOrders;
+        const page = await api.ordersPage(state.ordersPage);
+        const fresh = page.content || [];
+        const newlyPaid = fresh.find((order) => normalizeName(order.paymentStatus) === 'PAID' && !previousPaid.has(order.orderId));
+        state.paymentPollFailures = 0;
+        state.orders = fresh;
         if (newlyPaid) toast(`Payment successful for ${newlyPaid.orderCode}.`, 'success', 'Payment successful');
         await renderOrders(container, false);
       } catch (error) {
-        if (error.status === 401 || error.authExpired) stopPaymentPolling();
-      } finally {
-        polling = false;
-      }
+        if (error.status === 401 || error.authExpired || error.cancelled) stopPaymentPolling();
+        else {
+          state.paymentPollFailures += 1;
+          if (state.paymentPollFailures >= 3) { stopPaymentPolling(); toast('Automatic payment refresh stopped after three connection failures. Use Refresh payment status to retry.', 'error', 'Payment refresh stopped'); }
+        }
+      } finally { polling = false; }
     }, 5000);
   }
 }
@@ -1456,81 +1526,62 @@ function orderCard(order) {
   const isQr = method === 'QR_CODE';
   const canUpload = isQr && ['AWAITING_PAYMENT', 'FAILED'].includes(paymentStatus);
   const canShowQr = isQr && paymentStatus !== 'PAID';
-  const receiptUrl = safeExternalUrl(order.receiptUrl);
-  let paymentMessage = '';
-  if (paymentStatus === 'PAID') {
-    paymentMessage = isQr
-      ? '<div class="payment-result success"><strong>✓ Payment successful</strong><span>The online payment has been verified.</span></div>'
-      : '<div class="payment-result success"><strong>✓ COD payment completed</strong><span>The order was delivered and paid successfully.</span></div>';
-  } else if (isQr && paymentStatus === 'PENDING_VERIFICATION') {
-    paymentMessage = '<div class="payment-result pending"><strong>Receipt submitted</strong><span>Waiting for Admin verification. This page checks automatically every 5 seconds.</span></div>';
-  } else if (isQr) {
-    paymentMessage = '<div class="payment-result info"><strong>QR payment required</strong><span>Scan the QR and upload a receipt to continue.</span></div>';
-  } else {
-    paymentMessage = '<div class="payment-result info"><strong>Cash on delivery</strong><span>Order created successfully. Pay the courier when the order is delivered.</span></div>';
-  }
+  let paymentMessage = paymentStatus === 'PAID'
+    ? `<div class="payment-result success"><strong>✓ ${isQr ? 'Payment successful' : 'COD payment completed'}</strong><span>${isQr ? 'The online payment has been verified.' : 'The order was delivered and paid successfully.'}</span></div>`
+    : isQr && paymentStatus === 'PENDING_VERIFICATION'
+      ? '<div class="payment-result pending"><strong>Receipt submitted</strong><span>Waiting for Admin verification. Automatic refresh stops after repeated connection failures.</span></div>'
+      : isQr ? '<div class="payment-result info"><strong>QR payment required</strong><span>Open the order-specific QR and upload a receipt.</span></div>'
+        : '<div class="payment-result info"><strong>Cash on delivery</strong><span>Pay the courier when the order is delivered.</span></div>';
+  const items = Array.isArray(order.items) ? order.items : [];
   return `<article class="card order-card" data-testid="order-${order.orderId}">
     <div class="order-head"><div><h3>${escapeHtml(order.orderCode)}</h3><p>${dateTime(order.createdAt)}</p></div><div class="status-pair">${statusBadge(order.status, 'Order')}${statusBadge(order.paymentStatus, 'Payment')}</div></div>
-    <div class="order-meta">
-      <div><span>Total</span><strong>${money(order.total)}</strong></div>
-      <div><span>Payment method</span><strong>${escapeHtml(order.paymentMethod)}</strong></div>
-      <div><span>Voucher</span><strong>${escapeHtml(order.voucherCode || 'None')}</strong></div>
-      <div><span>Receiver</span><strong>${escapeHtml(order.receiverName)}</strong></div>
-      <div><span>Phone</span><strong>${escapeHtml(order.receiverPhone)}</strong></div>
-      <div><span>Receipt</span><strong>${receiptUrl ? 'Uploaded' : 'Not uploaded'}</strong></div>
-    </div>
-    ${paymentMessage}
-    <p class="help">${escapeHtml(order.shippingAddress)}</p>
-    <div class="order-actions">
-      ${canShowQr ? `<button class="btn btn-secondary btn-sm" data-show-payment-qr="${order.orderId}" data-testid="show-payment-qr-${order.orderId}">Show payment QR</button>` : ''}
-      ${canUpload ? `<button class="btn btn-primary btn-sm" data-upload-qr="${order.orderId}" data-testid="upload-qr-${order.orderId}">Upload payment receipt</button>` : ''}
-      ${receiptUrl ? `<button class="btn btn-secondary btn-sm" data-view-receipt="${order.orderId}" data-testid="view-receipt-${order.orderId}">View uploaded receipt</button>` : ''}
-    </div>
+    <div class="order-items"><h4>Order items</h4>${items.length ? `<div class="table-wrap"><table><thead><tr><th>Product</th><th>Unit price</th><th>Qty</th><th>Subtotal</th></tr></thead><tbody>${items.map((item) => `<tr><td><div class="order-item-name">${item.productImage ? `<img class="product-thumb" src="${escapeHtml(item.productImage)}" alt="" />` : ''}<strong>${escapeHtml(item.productName || `Product #${item.productId}`)}</strong></div></td><td>${money(item.unitPrice)}</td><td>${Number(item.quantity || 0)}</td><td>${money(item.subtotal)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="help">No item details were returned for this legacy order.</p>'}</div>
+    <div class="order-meta"><div><span>Total</span><strong>${money(order.total)}</strong></div><div><span>Payment method</span><strong>${escapeHtml(method)}</strong></div><div><span>Voucher</span><strong>${escapeHtml(order.voucherCode || 'None')}</strong></div><div><span>Receiver</span><strong>${escapeHtml(order.receiverName)}</strong></div><div><span>Phone</span><strong>${escapeHtml(order.receiverPhone)}</strong></div><div><span>Receipt uploaded</span><strong>${order.hasReceipt ? dateTime(order.receiptUploadedAt) : 'Not uploaded'}</strong></div><div><span>Payment verified</span><strong>${order.paymentVerifiedAt ? dateTime(order.paymentVerifiedAt) : 'Not verified'}</strong></div></div>
+    ${paymentMessage}<p class="help">${escapeHtml(order.shippingAddress)}</p>
+    <div class="order-actions">${canShowQr ? `<button class="btn btn-secondary btn-sm" data-show-payment-qr="${order.orderId}" data-testid="show-payment-qr-${order.orderId}">Show payment QR</button>` : ''}${canUpload ? `<button class="btn btn-primary btn-sm" data-upload-qr="${order.orderId}" data-testid="upload-qr-${order.orderId}">Upload payment receipt</button>` : ''}${order.hasReceipt ? `<button class="btn btn-secondary btn-sm" data-view-receipt="${order.orderId}" data-testid="view-receipt-${order.orderId}">View uploaded receipt</button>` : ''}</div>
   </article>`;
 }
 
-function openReceiptModal(receiptUrl, orderCode = 'order') {
-  const safeUrl = safeExternalUrl(receiptUrl);
-  if (!safeUrl) return toast('No valid receipt image is available for this order.', 'error', 'Receipt unavailable');
-  showModal({
-    title: `Payment receipt — ${orderCode}`,
-    large: true,
-    body: `<div class="receipt-preview"><img src="${escapeHtml(safeUrl)}" alt="Payment receipt for ${escapeHtml(orderCode)}" data-testid="receipt-image" /><p class="help">Review the uploaded receipt before changing the payment status.</p><a class="btn btn-secondary btn-sm" href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">Open full image</a></div>`,
-    footer: '<button class="btn btn-secondary" data-close-modal>Close</button>'
-  });
+async function openReceiptModal(orderId, admin = false) {
+  showModal({ title: 'Protected payment receipt', large: true, body: `<div id="receipt-content">${loading('Loading protected receipt...')}</div>`, footer: '<button class="btn btn-secondary" data-close-modal>Close</button>' });
+  try {
+    const blob = await (admin ? api.adminReceipt(orderId) : api.customerReceipt(orderId));
+    const modal = document.querySelector('#active-modal');
+    if (!modal) return;
+    const objectUrl = URL.createObjectURL(blob);
+    modal.dataset.objectUrl = objectUrl;
+    document.querySelector('#receipt-content').innerHTML = `<div class="receipt-preview"><img src="${objectUrl}" alt="Protected payment receipt" data-testid="receipt-image" /><p class="help">This image was fetched through an authenticated backend endpoint and is not exposed as a permanent public URL.</p></div>`;
+  } catch (error) {
+    const content = document.querySelector('#receipt-content');
+    if (content && !error.cancelled) content.innerHTML = `<div class="empty"><strong>Receipt unavailable</strong>${escapeHtml(error.message)}</div>`;
+  }
 }
 
-function openQrModal(orderId) {
-  showModal({
-    title: `Pay and upload receipt for order #${orderId}`,
-    large: true,
-    body: `<div class="qr-upload-layout">
-      <div class="qr-upload-payment">
-        <img src="${paymentQrAsset}" alt="MB VietQR payment" />
-        <div><strong>${PAYMENT_QR_BANK} · ${PAYMENT_QR_ACCOUNT_NUMBER}</strong><p class="help">Account name: ${PAYMENT_QR_ACCOUNT_NAME}. Use your order code as the transfer note.</p></div>
-      </div>
-      <form id="qr-form"><div class="field"><label>Payment receipt — JPG or PNG, maximum 5 MB</label><input class="input" type="file" id="qr-file" accept="image/jpeg,image/png" required data-testid="qr-file" /></div><p class="help">A successful upload changes payment status to PENDING_VERIFICATION. Admin must confirm the receipt before the customer sees “Payment successful”.</p></form>
-    </div>`,
-    footer: '<button class="btn btn-secondary" data-close-modal>Cancel</button><button class="btn btn-primary" id="upload-qr-submit" data-testid="upload-qr-submit">Upload receipt</button>'
-  });
-  document.querySelector('#upload-qr-submit').addEventListener('click', async (event) => {
-    const input = document.querySelector('#qr-file');
-    const file = input.files[0];
-    if (!file) return toast('Choose an image file.', 'error');
-    if (!['image/jpeg', 'image/png'].includes(file.type)) return toast('Only JPG and PNG are accepted.', 'error');
-    if (file.size > 5 * 1024 * 1024) return toast('The file exceeds 5 MB.', 'error');
-    setBusy(event.currentTarget, true, 'Uploading...');
-    try {
-      const response = await api.uploadQr(orderId, file);
-      toast(response.message || 'Receipt uploaded.');
-      closeModal();
-      state.orders = [];
-      renderCurrentView(true);
-    } catch (error) {
-      toast(error.message, 'error');
-      setBusy(event.currentTarget, false);
-    }
-  });
+async function openQrModal(orderId) {
+  showModal({ title: `Pay and upload receipt for order #${orderId}`, large: true, body: `<div id="qr-upload-content">${loading('Loading order-specific payment QR...')}</div>`, footer: '<button class="btn btn-secondary" data-close-modal>Cancel</button><button class="btn btn-primary" id="upload-qr-submit" data-testid="upload-qr-submit" disabled>Upload receipt</button>' });
+  let info;
+  try {
+    const [loadedInfo, blob] = await Promise.all([api.paymentQrInfo(orderId), api.paymentQrCode(orderId)]);
+    info = loadedInfo;
+    const modal = document.querySelector('#active-modal');
+    if (!modal) return;
+    const objectUrl = URL.createObjectURL(blob);
+    modal.dataset.objectUrl = objectUrl;
+    document.querySelector('#qr-upload-content').innerHTML = `<div class="qr-upload-layout">${paymentQrDetailsMarkup(info, objectUrl, false)}<form id="qr-form"><div class="field"><label>Payment receipt — JPG or PNG, maximum 5 MB</label><input class="input" type="file" id="qr-file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" required data-testid="qr-file" /></div><div id="qr-file-details"></div><p class="help">Uploading again after FAILED safely replaces the old Cloudinary asset.</p></form></div>`;
+    const submit = document.querySelector('#upload-qr-submit');
+    submit.disabled = false;
+    document.querySelector('#qr-file')?.addEventListener('change', (event) => { const file=event.target.files?.[0]; const error=validateImageFile(file,'Receipt'); document.querySelector('#qr-file-details').innerHTML=error?`<p class="field-error">${escapeHtml(error)}</p>`:fileDetailsMarkup(file); if(error) event.target.value=''; });
+    submit.addEventListener('click', async (event) => {
+      const file = document.querySelector('#qr-file')?.files?.[0];
+      const validationError = validateImageFile(file, 'Receipt');
+      if (validationError) return toast(validationError, 'error');
+      setBusy(event.currentTarget, true, 'Uploading...');
+      try { const response = await api.uploadQr(orderId, file); toast(response.message || 'Receipt uploaded.'); closeModal(); state.orders=[]; renderCurrentView(true); }
+      catch (error) { if(!error.cancelled) toast(error.message,'error'); setBusy(event.currentTarget,false); }
+    });
+  } catch (error) {
+    const content=document.querySelector('#qr-upload-content'); if(content && !error.cancelled) content.innerHTML=`<div class="empty"><strong>QR unavailable</strong>${escapeHtml(error.message)}</div>`;
+  }
 }
 
 function ordersTable(orders, admin) {
@@ -1540,183 +1591,51 @@ function ordersTable(orders, admin) {
 
 async function renderAdminOrders(container, force = false) {
   if (force || !state.adminOrders.length || !state.orderStatuses.length) {
-    const [orders, statuses] = await Promise.all([api.adminOrders(), api.orderStatuses()]);
-    state.adminOrders = Array.isArray(orders) ? orders : [];
+    const [page, statuses] = await Promise.all([api.adminOrdersPage(state.adminOrdersPage), api.orderStatuses()]);
+    state.adminOrders = page.content || [];
+    state.adminOrdersPage = { page: page.page, size: page.size, totalElements: page.totalElements, totalPages: page.totalPages };
     state.orderStatuses = Array.isArray(statuses) ? statuses : [];
   }
-
-  if (!state.orderStatuses.length) {
-    container.innerHTML = `<section class="card card-pad">${empty('Order statuses unavailable', 'The backend did not return any valid order statuses.')}</section>`;
-    return;
-  }
-
-  container.innerHTML = `
-    <section class="card">
-      <div class="card-header"><div><h3>All system orders</h3><p>Only backend-approved status transitions are selectable. QR payments can be verified only while awaiting Admin verification.</p></div></div>
-      ${state.adminOrders.length ? `<div class="table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Order status</th><th>Payment</th><th>Total</th><th>Actions</th></tr></thead><tbody>
-        ${state.adminOrders.map((order) => {
-          const isQr = canonicalPaymentMethodName(order.paymentMethod) === 'QR_CODE';
-          const receiptUrl = safeExternalUrl(order.receiptUrl);
-          const currentStatus = normalizeName(order.status);
-          const currentPaymentStatus = normalizeName(order.paymentStatus);
-          const allowedNextStatuses = new Set((Array.isArray(order.allowedNextStatuses) ? order.allowedNextStatuses : []).map(normalizeName));
-          const visibleStatuses = state.orderStatuses.filter((status) => {
-            const statusName = normalizeName(status.statusName);
-            return statusName === currentStatus || allowedNextStatuses.has(statusName);
-          });
-          const canChangeStatus = visibleStatuses.some((status) => normalizeName(status.statusName) !== currentStatus);
-          const canChooseVerification = isQr
-            && !['PAID', 'FAILED'].includes(currentPaymentStatus);
-          const canVerifyPayment = canChooseVerification
-            && currentStatus === 'PENDING'
-            && currentPaymentStatus === 'PENDING_VERIFICATION'
-            && Boolean(receiptUrl);
-          return `<tr data-testid="admin-order-${order.orderId}">
-            <td><strong>${escapeHtml(order.orderCode)}</strong><div class="help">#${order.orderId} · ${dateTime(order.createdAt)}</div><div class="help">Voucher: ${escapeHtml(order.voucherCode || 'None')}</div></td>
-            <td>${escapeHtml(order.receiverName)}<div class="help">${escapeHtml(order.receiverPhone)}</div></td>
-            <td>
-              ${statusBadge(order.status, 'Current')}
-              <select class="select" style="margin-top:7px;min-width:180px" id="status-${order.orderId}" data-testid="order-status-${order.orderId}" ${canChangeStatus ? '' : 'disabled'}>
-                ${visibleStatuses.map((status) => `<option value="${status.statusId}" ${normalizeName(status.statusName) === currentStatus ? 'selected' : ''}>${escapeHtml(status.statusName)}</option>`).join('')}
-              </select>
-              <div class="help">${canChangeStatus ? `Allowed next: ${escapeHtml([...allowedNextStatuses].join(', '))}` : 'Terminal status: no further transition is allowed.'}</div>
-            </td>
-            <td>
-              ${statusBadge(order.paymentStatus, 'Current')}
-              <div class="help">${escapeHtml(canonicalPaymentMethodName(order.paymentMethod))}</div>
-              ${isQr ? `<select class="select" style="margin-top:7px;min-width:180px" id="payment-${order.orderId}" data-testid="payment-status-${order.orderId}" ${canChooseVerification ? '' : 'disabled'}>
-                <option value="">Choose verification result</option>
-                <option value="PAID">PAID</option>
-                <option value="FAILED">FAILED</option>
-              </select>
-              <div class="help">${receiptUrl ? (canVerifyPayment ? 'Receipt uploaded and ready to review.' : `The dropdown is available, but Verify payment remains locked until the order is PENDING and payment is PENDING_VERIFICATION. Current: ${escapeHtml(currentStatus)} / ${escapeHtml(currentPaymentStatus)}.`) : 'The dropdown can be opened, but a receipt must be uploaded before verification is allowed.'}</div>` : '<div class="help">Pay on delivery; payment becomes PAID when the order is DELIVERED.</div>'}
-            </td>
-            <td>${money(order.total)}</td>
-            <td><div class="table-actions">
-              <button class="btn btn-secondary btn-sm" data-update-status="${order.orderId}" ${canChangeStatus ? '' : 'disabled'}>Update status</button>
-              ${isQr ? `<button class="btn btn-secondary btn-sm" data-admin-view-payment-qr="${order.orderId}" data-testid="admin-view-payment-qr-${order.orderId}">View Payment QR</button>` : ''}
-              ${isQr && receiptUrl ? `<button class="btn btn-secondary btn-sm" data-admin-view-receipt="${order.orderId}" data-testid="admin-view-receipt-${order.orderId}">View Receipt</button>` : ''}
-              ${isQr ? `<button class="btn btn-success btn-sm" data-update-payment="${order.orderId}" ${canVerifyPayment ? '' : 'disabled'}>Verify payment</button>` : ''}
-            </div></td>
-          </tr>`;
-        }).join('')}
-      </tbody></table></div>` : empty('No system orders', 'Create an order using a customer account.')}
-    </section>`;
-
-  container.querySelectorAll('[data-admin-view-payment-qr]').forEach((button) => button.addEventListener('click', () => {
-    const order = state.adminOrders.find((item) => Number(item.orderId) === Number(button.dataset.adminViewPaymentQr));
-    openConfiguredPaymentQrModal({
-      orderCode: order?.orderCode,
-      amount: order?.total,
-      paymentStatus: order?.paymentStatus,
-      adminView: true,
-      title: `Payment QR — ${order?.orderCode || `order #${button.dataset.adminViewPaymentQr}`}`
-    });
-  }));
-
-  container.querySelectorAll('[data-admin-view-receipt]').forEach((button) => button.addEventListener('click', () => {
-    const order = state.adminOrders.find((item) => Number(item.orderId) === Number(button.dataset.adminViewReceipt));
-    openReceiptModal(order?.receiptUrl, order?.orderCode);
-  }));
-
-  container.querySelectorAll('[data-update-status]').forEach((button) => button.addEventListener('click', async () => {
-    const orderId = Number(button.dataset.updateStatus);
-    const order = state.adminOrders.find((item) => Number(item.orderId) === orderId);
-    const statusId = Number(document.querySelector(`#status-${orderId}`).value);
-    const selectedStatus = state.orderStatuses.find((status) => Number(status.statusId) === statusId);
-    if (!selectedStatus) return toast('Choose a valid order status returned by the backend.', 'error');
-    if (normalizeName(selectedStatus.statusName) === normalizeName(order?.status)) {
-      return toast('Choose one of the allowed next statuses before updating.', 'error');
-    }
-    if (!confirm(`Change ${order?.orderCode || `order #${orderId}`} from ${order?.status} to ${selectedStatus.statusName}?`)) return;
-    setBusy(button, true, 'Updating...');
-    try {
-      await api.updateOrderStatus(orderId, statusId);
-      toast(`Order status updated to ${selectedStatus.statusName}.`);
-      state.adminOrders = [];
-      renderCurrentView();
-    } catch (error) {
-      if (!error.authExpired) toast(error.message, 'error');
-      setBusy(button, false);
-    }
-  }));
-
-  container.querySelectorAll('[data-update-payment]').forEach((button) => button.addEventListener('click', async () => {
-    const orderId = Number(button.dataset.updatePayment);
-    const order = state.adminOrders.find((item) => Number(item.orderId) === orderId);
-    if (!safeExternalUrl(order?.receiptUrl)) return toast('Reviewable receipt image is required before payment verification.', 'error');
-    if (normalizeName(order?.status) !== 'PENDING' || normalizeName(order?.paymentStatus) !== 'PENDING_VERIFICATION') {
-      return toast('Payment can only be verified while the order is PENDING and payment is PENDING_VERIFICATION.', 'error');
-    }
-    const paymentStatus = document.querySelector(`#payment-${orderId}`).value;
-    if (!['PAID', 'FAILED'].includes(paymentStatus)) return toast('Choose PAID or FAILED.', 'error');
-    if (!confirm(`Mark payment for ${order?.orderCode || `order #${orderId}`} as ${paymentStatus}?`)) return;
-    setBusy(button, true, 'Updating...');
-    try {
-      await api.verifyPayment(orderId, paymentStatus);
-      toast(paymentStatus === 'PAID' ? 'Payment verified successfully.' : 'Payment marked as failed.');
-      state.adminOrders = [];
-      renderCurrentView();
-    } catch (error) {
-      if (!error.authExpired) toast(error.message, 'error');
-      setBusy(button, false);
-    }
-  }));
+  if (!state.orderStatuses.length) { container.innerHTML=`<section class="card card-pad">${empty('Order statuses unavailable','The backend did not return valid order statuses.')}</section>`; return; }
+  container.innerHTML = `<section class="card"><div class="card-header"><div><h3>All system orders</h3><p>Paginated data, protected receipts, and backend-approved transitions.</p></div></div>${state.adminOrders.length ? `<div class="table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Order status</th><th>Payment</th><th>Total</th><th>Actions</th></tr></thead><tbody>${state.adminOrders.map((order) => {
+    const isQr=canonicalPaymentMethodName(order.paymentMethod)==='QR_CODE'; const currentStatus=normalizeName(order.status); const currentPayment=normalizeName(order.paymentStatus); const allowed=new Set((order.allowedNextStatuses||[]).map(normalizeName)); const statuses=state.orderStatuses.filter((status)=>normalizeName(status.statusName)===currentStatus||allowed.has(normalizeName(status.statusName))); const canChange=statuses.some((status)=>normalizeName(status.statusName)!==currentStatus); const canChoose=isQr&&!['PAID','FAILED'].includes(currentPayment); const canVerify=canChoose&&currentStatus==='PENDING'&&currentPayment==='PENDING_VERIFICATION'&&order.hasReceipt;
+    return `<tr data-testid="admin-order-${order.orderId}"><td><strong>${escapeHtml(order.orderCode)}</strong><div class="help">#${order.orderId} · ${dateTime(order.createdAt)}</div><div class="help">Voucher: ${escapeHtml(order.voucherCode||'None')}</div></td><td>${escapeHtml(order.receiverName)}<div class="help">${escapeHtml(order.receiverPhone)}</div></td><td>${statusBadge(order.status,'Current')}<select class="select" style="margin-top:7px;min-width:180px" id="status-${order.orderId}" ${canChange?'':'disabled'}>${statuses.map((status)=>`<option value="${status.statusId}" ${normalizeName(status.statusName)===currentStatus?'selected':''}>${escapeHtml(status.statusName)}</option>`).join('')}</select><div class="help">${canChange?`Allowed next: ${escapeHtml([...allowed].join(', '))}`:'Terminal status'}</div></td><td>${statusBadge(order.paymentStatus,'Current')}<div class="help">${escapeHtml(canonicalPaymentMethodName(order.paymentMethod))}</div>${isQr?`<select class="select" style="margin-top:7px;min-width:180px" id="payment-${order.orderId}" ${canChoose?'':'disabled'}><option value="">Choose verification result</option><option value="PAID">PAID</option><option value="FAILED">FAILED</option></select><div class="help">${order.hasReceipt?`Uploaded: ${dateTime(order.receiptUploadedAt)}${order.paymentVerifiedAt?` · Verified: ${dateTime(order.paymentVerifiedAt)}`:''}`:'Receipt required before verification.'}</div>`:'<div class="help">COD is paid when delivered.</div>'}</td><td>${money(order.total)}</td><td><div class="table-actions"><button class="btn btn-secondary btn-sm" data-update-status="${order.orderId}" ${canChange?'':'disabled'}>Update status</button>${isQr?`<button class="btn btn-secondary btn-sm" data-admin-view-payment-qr="${order.orderId}">View Payment QR</button>`:''}${isQr&&order.hasReceipt?`<button class="btn btn-secondary btn-sm" data-admin-view-receipt="${order.orderId}">View Receipt</button>`:''}${isQr?`<button class="btn btn-success btn-sm" data-update-payment="${order.orderId}" ${canVerify?'':'disabled'}>Verify payment</button>`:''}</div></td></tr>`;
+  }).join('')}</tbody></table></div>`:empty('No system orders','Create an order using a customer account.')}</section>${paginationMarkup(state.adminOrdersPage,'admin-orders')}`;
+  bindPagination(container,'admin-orders',state.adminOrdersPage,async(page)=>{state.adminOrdersPage.page=page;state.adminOrders=[];await renderAdminOrders(container,true);});
+  container.querySelectorAll('[data-admin-view-payment-qr]').forEach((button)=>button.addEventListener('click',()=>openConfiguredPaymentQrModal({orderId:Number(button.dataset.adminViewPaymentQr),adminView:true,title:'Order-specific payment QR'})));
+  container.querySelectorAll('[data-admin-view-receipt]').forEach((button)=>button.addEventListener('click',()=>openReceiptModal(Number(button.dataset.adminViewReceipt),true)));
+  container.querySelectorAll('[data-update-status]').forEach((button)=>button.addEventListener('click',async()=>{const orderId=Number(button.dataset.updateStatus);const order=state.adminOrders.find((x)=>Number(x.orderId)===orderId);const statusId=Number(document.querySelector(`#status-${orderId}`).value);const selected=state.orderStatuses.find((x)=>Number(x.statusId)===statusId);if(!selected||normalizeName(selected.statusName)===normalizeName(order?.status))return toast('Choose an allowed next status.','error');if(!confirm(`Change ${order?.orderCode} to ${selected.statusName}?`))return;setBusy(button,true,'Updating...');try{await api.updateOrderStatus(orderId,statusId);toast(`Order status updated to ${selected.statusName}.`);state.adminOrders=[];renderCurrentView();}catch(error){if(!error.authExpired&&!error.cancelled)toast(error.message,'error');setBusy(button,false);}}));
+  container.querySelectorAll('[data-update-payment]').forEach((button)=>button.addEventListener('click',async()=>{const orderId=Number(button.dataset.updatePayment);const order=state.adminOrders.find((x)=>Number(x.orderId)===orderId);if(!order?.hasReceipt)return toast('Reviewable receipt is required.','error');if(normalizeName(order.status)!=='PENDING'||normalizeName(order.paymentStatus)!=='PENDING_VERIFICATION')return toast('Payment can only be verified for a PENDING order with PENDING_VERIFICATION payment.','error');const paymentStatus=document.querySelector(`#payment-${orderId}`).value;if(!['PAID','FAILED'].includes(paymentStatus))return toast('Choose PAID or FAILED.','error');if(!confirm(`Mark payment for ${order.orderCode} as ${paymentStatus}?`))return;setBusy(button,true,'Updating...');try{await api.verifyPayment(orderId,paymentStatus);toast(paymentStatus==='PAID'?'Payment verified successfully.':'Payment marked as failed.');state.adminOrders=[];renderCurrentView();}catch(error){if(!error.authExpired&&!error.cancelled)toast(error.message,'error');setBusy(button,false);}}));
 }
 
 function renderTestLab(container) {
   const cases = isAdmin() ? adminTestCases() : customerTestCases();
-  container.innerHTML = `
-    <div class="test-grid">
-      <section class="card card-pad">
-        <h3 style="margin-top:0">Executable smoke checks</h3>
-        <p class="help">These checks call the real API. Destructive tests are intentionally excluded from one-click execution.</p>
-        ${cases.map((test) => `<div class="test-case"><h4>${escapeHtml(test.id)} — ${escapeHtml(test.title)}</h4><p>${escapeHtml(test.description)}</p><button class="btn btn-secondary btn-sm" data-run-test="${test.id}" data-testid="run-${test.id}">Run test</button><div class="test-result" id="result-${test.id}"></div></div>`).join('')}
-      </section>
-      <section class="api-console">
-        <div class="api-console-toolbar"><strong>API evidence log</strong><button class="btn btn-ghost btn-sm" id="clear-log">Clear</button></div>
-        <div class="api-log" id="api-log">${apiLogMarkup()}</div>
-      </section>
-    </div>`;
-  document.querySelector('#clear-log').addEventListener('click', () => {
-    state.apiLogs = [];
-    document.querySelector('#api-log').innerHTML = apiLogMarkup();
-  });
-  container.querySelectorAll('[data-run-test]').forEach((button) => button.addEventListener('click', async () => {
-    const test = cases.find((item) => item.id === button.dataset.runTest);
-    const result = document.querySelector(`#result-${test.id}`);
-    setBusy(button, true, 'Running...');
-    try {
-      const message = await test.run();
-      result.style.color = 'var(--green)';
-      result.textContent = `PASS — ${message}`;
-    } catch (error) {
-      result.style.color = 'var(--red)';
-      result.textContent = `FAIL — ${error.message}`;
-    } finally {
-      setBusy(button, false);
-    }
-  }));
+  container.innerHTML = `<div class="test-grid"><section class="card card-pad"><h3 style="margin-top:0">Executable workflow checks</h3><p class="help">Read-only checks run immediately. Tests marked destructive require confirmation and operate on real database records.</p>${cases.map((test)=>`<div class="test-case"><h4>${escapeHtml(test.id)} — ${escapeHtml(test.title)}</h4><p>${escapeHtml(test.description)}</p>${test.file?`<input class="input" type="file" id="file-${test.id}" accept="image/jpeg,image/png,.jpg,.jpeg,.png" />`:''}<button class="btn btn-secondary btn-sm" data-run-test="${test.id}">Run test</button><div class="test-result" id="result-${test.id}"></div></div>`).join('')}</section><section class="api-console"><div class="api-console-toolbar"><strong>API evidence log ${isApiLogEnabled()?'':'(disabled in production)'}</strong><button class="btn btn-ghost btn-sm" id="clear-log">Clear</button></div><div class="api-log" id="api-log">${apiLogMarkup()}</div></section></div>`;
+  document.querySelector('#clear-log')?.addEventListener('click',()=>{state.apiLogs=[];document.querySelector('#api-log').innerHTML=apiLogMarkup();});
+  container.querySelectorAll('[data-run-test]').forEach((button)=>button.addEventListener('click',async()=>{const test=cases.find((item)=>item.id===button.dataset.runTest);const result=document.querySelector(`#result-${test.id}`);if(test.destructive&&!confirm(`${test.title} changes real backend data. Continue?`))return;setBusy(button,true,'Running...');try{const file=test.file?document.querySelector(`#file-${test.id}`)?.files?.[0]:null;const message=await test.run(file);result.style.color='var(--green)';result.textContent=`PASS — ${message}`;}catch(error){result.style.color='var(--red)';result.textContent=`FAIL — ${error.message}`;}finally{setBusy(button,false);}}));
 }
 
 function customerTestCases() {
   return [
-    { id: 'TC-PUB-01', title: 'Load public products', description: 'GET /api/products should return an array.', run: async () => { const data = await api.products(); if (!Array.isArray(data)) throw new Error('Response is not an array'); return `${data.length} product(s)`; } },
-    { id: 'TC-AUTH-01', title: 'Authenticated cart access', description: 'GET /api/carts should return cartId, items, and totalCartPrice.', run: async () => { const data = await api.cart(); if (!Array.isArray(data.items)) throw new Error('items is not an array'); return `${data.items.length} cart item(s)`; } },
-    { id: 'TC-ADDR-01', title: 'Load customer addresses', description: 'GET /api/addresses should return only the current user addresses.', run: async () => { const data = await api.addresses(); if (!Array.isArray(data)) throw new Error('Response is not an array'); return `${data.length} address(es)`; } },
-    { id: 'TC-ORD-01', title: 'Load customer order history', description: 'GET /api/orders should return the current user order history.', run: async () => { const data = await api.orders(); if (!Array.isArray(data)) throw new Error('Response is not an array'); return `${data.length} order(s)`; } },
-    { id: 'TC-REF-01', title: 'Load payment methods', description: 'GET /api/reference/payment-methods should return backend IDs for COD and QR_CODE.', run: async () => { const data = await api.paymentMethods(); if (!Array.isArray(data)) throw new Error('Response is not an array'); const names = new Set(data.map((item) => normalizeName(item.methodName))); if (!names.has('COD') || !names.has('QR_CODE')) throw new Error('COD or QR_CODE is missing'); return data.map((item) => `${item.methodName}=ID ${item.paymentMethodId}`).join(', '); } },
-    { id: 'TC-SEC-01', title: 'Customer denied admin orders', description: 'GET /api/admin/orders should return 401/403 for a CUSTOMER token.', run: async () => { try { await api.adminOrders(); } catch (error) { if ([401,403].includes(error.status)) return `Correctly rejected with HTTP ${error.status}`; throw error; } throw new Error('Security defect: customer accessed admin orders'); } }
+    { id:'TC-PUB-01',title:'Paginated active products',description:'Loads active products and independent category reference data.',run:async()=>{const [p,c]=await Promise.all([api.productsPage({page:0,size:5}),api.categories()]);if(!Array.isArray(p.content)||!Array.isArray(c))throw new Error('Invalid paged/category contract');return `${p.totalElements} product(s), ${c.length} category(s)`;}},
+    { id:'TC-CART-CRUD',title:'Add, update, and remove cart item',description:'Uses an ACTIVE product that is not already in the cart, then removes only the temporary test item.',destructive:true,run:async()=>{const [p,before]=await Promise.all([api.productsPage({page:0,size:100}),api.cart()]);const existingIds=new Set((before.items||[]).map((x)=>Number(x.productId)));const product=p.content.find((x)=>Number(x.stock)>=2&&!existingIds.has(Number(x.productId)));if(!product)throw new Error('No unused product with stock >= 2');await api.addCartItem(product.productId,1);await api.updateCartItem(product.productId,2);const cart=await api.cart();const item=cart.items.find((x)=>Number(x.productId)===Number(product.productId));if(!item||Number(item.quantity)!==2)throw new Error('Update did not persist');await api.removeCartItem(item.cartItemId);state.cart=null;return `Add/update/remove passed for ${product.productName}`;}},
+    { id:'TC-VOUCHER-01',title:'Voucher price preview',description:'Enter a voucher code when prompted; blank tests checkout preview without a voucher.',run:async()=>{const code=prompt('Voucher code (leave blank for no voucher):','')||'';const preview=await api.previewOrder(code.trim());if(!Array.isArray(preview.items))throw new Error('Preview items missing');return `Total ${money(preview.total)}`;}},
+    { id:'TC-CHECKOUT-COD',title:'Create COD checkout',description:'Creates a real COD order from the current cart and first saved address using an idempotency key.',destructive:true,run:async()=>{const [cart,addresses,methods]=await Promise.all([api.cart(),api.addresses(),api.paymentMethods()]);if(!cart.items?.length)throw new Error('Cart is empty');if(!addresses.length)throw new Error('No saved address');const cod=methods.find((x)=>canonicalPaymentMethodName(x.methodName)==='COD');if(!cod)throw new Error('COD missing');const order=await api.checkout({addressId:addresses[0].addressId,manualAddress:null,paymentMethodId:cod.paymentMethodId,voucherCode:null,note:'Automated Test Lab COD checkout'},createIdempotencyKey());state.cart=null;state.orders=[];return `Created ${order.orderCode}`;}},
+    { id:'TC-CHECKOUT-QR',title:'Create QR checkout',description:'Creates a real QR order from the current cart and first saved address using the backend payment-method ID and idempotency key.',destructive:true,run:async()=>{const [cart,addresses,methods]=await Promise.all([api.cart(),api.addresses(),api.paymentMethods()]);if(!cart.items?.length)throw new Error('Cart is empty');if(!addresses.length)throw new Error('No saved address');const qr=methods.find((x)=>canonicalPaymentMethodName(x.methodName)==='QR_CODE');if(!qr)throw new Error('QR_CODE missing');const order=await api.checkout({addressId:addresses[0].addressId,manualAddress:null,paymentMethodId:qr.paymentMethodId,voucherCode:null,note:'Automated Test Lab QR checkout'},createIdempotencyKey());state.cart=null;state.orders=[];return `Created QR order ${order.orderCode}`;}},
+    { id:'TC-RECEIPT-UPLOAD',title:'Upload QR receipt',description:'Select a JPG/PNG. Uploads it to the first QR order in AWAITING_PAYMENT or FAILED.',destructive:true,file:true,run:async(file)=>{const error=validateImageFile(file,'Receipt');if(error)throw new Error(error);const page=await api.ordersPage({page:0,size:100});const order=page.content.find((x)=>canonicalPaymentMethodName(x.paymentMethod)==='QR_CODE'&&['AWAITING_PAYMENT','FAILED'].includes(normalizeName(x.paymentStatus)));if(!order)throw new Error('No eligible QR order');await api.uploadQr(order.orderId,file);state.orders=[];return `Uploaded receipt for ${order.orderCode}`;}},
+    { id:'TC-ORD-01',title:'Paginated order items',description:'Verifies each returned order contains an items array and protected receipt metadata.',run:async()=>{const page=await api.ordersPage({page:0,size:10});const invalid=page.content.find((x)=>!Array.isArray(x.items)||!('hasReceipt' in x));if(invalid)throw new Error('Order contract incomplete');return `${page.totalElements} order(s)`;}},
+    { id:'TC-SEC-01',title:'Customer denied admin orders',description:'Admin endpoint must reject a CUSTOMER token.',run:async()=>{try{await api.adminOrdersPage({page:0,size:1});}catch(error){if([401,403].includes(error.status))return `Rejected HTTP ${error.status}`;throw error;}throw new Error('Customer accessed Admin orders');}}
   ];
 }
 
 function adminTestCases() {
   return [
-    { id: 'TC-PUB-01', title: 'Load public products', description: 'GET /api/products should return an array.', run: async () => { const data = await api.products(); if (!Array.isArray(data)) throw new Error('Response is not an array'); return `${data.length} product(s)`; } },
-    { id: 'TC-ADM-01', title: 'Load all orders', description: 'GET /api/admin/orders should succeed for ADMIN.', run: async () => { const data = await api.adminOrders(); if (!Array.isArray(data)) throw new Error('Response is not an array'); return `${data.length} order(s)`; } },
-    { id: 'TC-REF-02', title: 'Load order statuses', description: 'GET /api/reference/order-statuses should return database IDs and names.', run: async () => { const data = await api.orderStatuses(); if (!Array.isArray(data) || !data.length) throw new Error('No statuses returned'); if (data.some((item) => !Number(item.statusId) || !item.statusName)) throw new Error('Invalid status contract'); return `${data.length} status(es)`; } },
-    { id: 'TC-SEC-02', title: 'Admin denied customer cart', description: 'GET /api/carts should return 401/403 for an ADMIN token.', run: async () => { try { await api.cart(); } catch (error) { if ([401,403].includes(error.status)) return `Correctly rejected with HTTP ${error.status}`; throw error; } throw new Error('Security defect: admin accessed customer cart'); } },
-    { id: 'TC-DATA-01', title: 'Product contract fields', description: 'Each product should expose the ProductResponse fields used by the UI.', run: async () => { const data = await api.products(); const invalid = data.find((p) => !('productId' in p) || !('productName' in p) || !('price' in p) || !('stock' in p)); if (invalid) throw new Error('A product is missing required fields'); return 'Product response contract is valid'; } }
+    {id:'TC-ADM-PAGE',title:'Paginated Admin orders',description:'Loads one page and verifies page metadata.',run:async()=>{const page=await api.adminOrdersPage({page:0,size:10});if(!Array.isArray(page.content)||typeof page.totalElements!=='number')throw new Error('Invalid page contract');return `${page.totalElements} order(s)`;}},
+    {id:'TC-VERIFY-PAYMENT',title:'Verify pending QR payment',description:'Marks the first eligible PENDING_VERIFICATION receipt as PAID.',destructive:true,run:async()=>{const page=await api.adminOrdersPage({page:0,size:100});const order=page.content.find((x)=>normalizeName(x.status)==='PENDING'&&normalizeName(x.paymentStatus)==='PENDING_VERIFICATION'&&x.hasReceipt);if(!order)throw new Error('No eligible payment');await api.verifyPayment(order.orderId,'PAID');state.adminOrders=[];return `Verified ${order.orderCode}`;}},
+    {id:'TC-ORDER-STATUS',title:'Apply allowed order transition',description:'Selects a backend-allowed transition that also satisfies QR payment rules, then sends the backend status ID.',destructive:true,run:async()=>{const [page,statuses]=await Promise.all([api.adminOrdersPage({page:0,size:100}),api.orderStatuses()]);let choice=null;for(const order of page.content){const allowed=(order.allowedNextStatuses||[]).map(normalizeName);const method=canonicalPaymentMethodName(order.paymentMethod);const payment=normalizeName(order.paymentStatus);const preferred=allowed.find((next)=>next!=='PROCESSING'||method!=='QR_CODE'||payment==='PAID');if(preferred){choice={order,next:preferred};break;}}if(!choice)throw new Error('No order has a currently valid transition');const status=statuses.find((x)=>normalizeName(x.statusName)===choice.next);if(!status)throw new Error(`Status ID missing for ${choice.next}`);await api.updateOrderStatus(choice.order.orderId,status.statusId);state.adminOrders=[];return `${choice.order.orderCode}: ${choice.order.status} → ${choice.next}`;}},
+    {id:'TC-RECEIPT-PROTECTED',title:'Protected receipt access',description:'Loads the first available receipt through the authenticated Admin endpoint.',run:async()=>{const page=await api.adminOrdersPage({page:0,size:100});const order=page.content.find((x)=>x.hasReceipt);if(!order)throw new Error('No receipt available');const blob=await api.adminReceipt(order.orderId);if(!blob.size)throw new Error('Empty receipt');return `${blob.size} bytes for ${order.orderCode}`;}},
+    {id:'TC-REF-02',title:'Reference data IDs',description:'Loads categories, payment methods, and order statuses from backend APIs.',run:async()=>{const [c,p,s]=await Promise.all([api.categories(),api.paymentMethods(),api.orderStatuses()]);if(!c.length||!p.length||!s.length)throw new Error('Reference data missing');return `${c.length} categories, ${p.length} methods, ${s.length} statuses`;}},
+    {id:'TC-SEC-02',title:'Admin denied customer cart',description:'Customer cart endpoint must reject an ADMIN token.',run:async()=>{try{await api.cart();}catch(error){if([401,403].includes(error.status))return `Rejected HTTP ${error.status}`;throw error;}throw new Error('Admin accessed customer cart');}}
   ];
 }
 
@@ -1728,34 +1647,7 @@ function apiLogMarkup() {
 function renderSettings(container) {
   const config = getConfig();
   const endpointLabel = config.apiBaseUrl || 'Same origin (/api through the Vite proxy)';
-  container.innerHTML = `
-    <div class="grid grid-2">
-      <section class="card card-pad">
-        <h3 style="margin-top:0">Secure API configuration</h3>
-        <div class="test-case">
-          <h4>API base URL</h4>
-          <p><code>${escapeHtml(endpointLabel)}</code></p>
-          <p>The API destination is fixed at build time by <code>VITE_API_BASE_URL</code>. Customers cannot change it, so the JWT cannot be redirected to an arbitrary server through this page.</p>
-        </div>
-        ${isAdmin() ? `<form id="settings-form" data-testid="settings-form">
-          <div class="field"><label>Default category ID for product forms</label><input class="input" type="number" min="1" name="categoryId" value="${config.categoryId}" data-testid="default-category-id" /><p class="help">This setting is only used as the initial value in Admin product forms.</p></div>
-          <div class="form-actions"><button class="btn btn-primary" type="submit" data-testid="save-settings">Save product default</button></div>
-        </form>` : '<p class="help">Customer accounts have no editable environment settings.</p>'}
-      </section>
-      <section class="card card-pad">
-        <h3 style="margin-top:0">Database reference data</h3>
-        <div class="test-case"><h4>Payment methods</h4><p>Checkout loads COD and QR_CODE IDs from <code>GET /api/reference/payment-methods</code>. No payment ID is hardcoded in the browser.</p></div>
-        <div class="test-case"><h4>Order statuses</h4><p>Admin Orders loads valid status IDs from <code>GET /api/reference/order-statuses</code>. The current status is selected automatically.</p></div>
-        <div class="test-case"><h4>Session protection</h4><p>Malformed or expired JWTs are removed before the dashboard opens. Any authenticated HTTP 401 clears all user state and stops payment polling.</p></div>
-      </section>
-    </div>`;
-
-  document.querySelector('#settings-form')?.addEventListener('submit', (event) => {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    saveConfig({ categoryId: Number(data.get('categoryId')) });
-    toast('Admin product default saved.');
-  });
+  container.innerHTML = `<div class="grid grid-2"><section class="card card-pad"><h3 style="margin-top:0">Secure API configuration</h3><div class="test-case"><h4>API base URL</h4><p><code>${escapeHtml(endpointLabel)}</code></p><p>The destination is fixed at build time through <code>VITE_API_BASE_URL</code>. No user role can redirect JWT requests from this page.</p></div><div class="test-case"><h4>API evidence logging</h4><p>${isApiLogEnabled()?'Enabled for this test/development build. Personal data is redacted.':'Disabled in this production build.'}</p></div><p class="help">There is no browser-stored default category ID. Product forms require a category returned by <code>GET /api/reference/categories</code>.</p></section><section class="card card-pad"><h3 style="margin-top:0">Runtime protections</h3><div class="test-case"><h4>Session storage</h4><p>JWT is stored in sessionStorage, validated using its exp claim on startup, and removed with all user state after logout or HTTP 401.</p></div><div class="test-case"><h4>Request lifecycle</h4><p>Every request has a timeout and is cancelled when the user changes screens.</p></div><div class="test-case"><h4>Backend reference data</h4><p>Categories, payment methods, and order statuses are loaded from dedicated APIs. Database IDs are never configured manually here.</p></div></section></div>`;
 }
 
 window.addEventListener('swt-auth-expired', () => {
