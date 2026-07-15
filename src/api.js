@@ -65,6 +65,7 @@ function extractErrorMessage(payload, status) {
 function sanitizeForLog(value) {
   if (Array.isArray(value)) return value.map(sanitizeForLog);
   if (!value || typeof value !== 'object') return value;
+  if (value instanceof Blob) return `[Blob ${value.type || 'application/octet-stream'}, ${value.size} bytes]`;
   return Object.fromEntries(Object.entries(value).map(([key, item]) => {
     const normalized = key.toLowerCase();
     if (normalized.includes('password') || normalized.includes('token') || normalized.includes('hash')) {
@@ -88,6 +89,7 @@ export async function apiRequest(path, options = {}) {
   const session = getSession();
   const method = options.method || 'GET';
   const isFormData = options.body instanceof FormData;
+  const responseType = options.responseType || 'json';
   const headers = new Headers(options.headers || {});
 
   if (!isFormData && options.body !== undefined) {
@@ -110,6 +112,7 @@ export async function apiRequest(path, options = {}) {
   try {
     response = await fetch(buildUrl(path), {
       ...options,
+      responseType: undefined,
       method,
       headers,
       body: isFormData
@@ -119,11 +122,15 @@ export async function apiRequest(path, options = {}) {
           : JSON.stringify(options.body)
     });
 
-    const text = await response.text();
-    try {
-      payload = text ? JSON.parse(text) : null;
-    } catch {
-      payload = text;
+    if (responseType === 'blob' && response.ok) {
+      payload = await response.blob();
+    } else {
+      const text = await response.text();
+      try {
+        payload = text ? JSON.parse(text) : null;
+      } catch {
+        payload = text;
+      }
     }
 
     emitApiLog({
@@ -138,6 +145,7 @@ export async function apiRequest(path, options = {}) {
     });
 
     if (!response.ok) {
+      if (response.status === 401) clearSession();
       const error = new Error(extractErrorMessage(payload, response.status));
       error.status = response.status;
       error.payload = payload;
@@ -168,14 +176,16 @@ export async function apiRequest(path, options = {}) {
 }
 
 export const api = {
-  login: (username, password) => apiRequest('/api/auth/login', {
+  login: (identifier, password) => apiRequest('/api/auth/login', {
     method: 'POST',
-    body: { username, password }
+    body: { username: identifier, password }
   }),
   register: (payload) => apiRequest('/api/auth/register', {
     method: 'POST',
     body: payload
   }),
+  profile: () => apiRequest('/api/profile'),
+  updateProfile: (payload) => apiRequest('/api/profile', { method: 'PUT', body: payload }),
   products: () => apiRequest('/api/products'),
   product: (id) => apiRequest(`/api/products/${id}`),
   createProduct: (formData) => apiRequest('/api/admin/products', { method: 'POST', body: formData }),
@@ -194,6 +204,7 @@ export const api = {
   addresses: () => apiRequest('/api/addresses'),
   createAddress: (payload) => apiRequest('/api/addresses', { method: 'POST', body: payload }),
   updateAddress: (id, payload) => apiRequest(`/api/addresses/${id}`, { method: 'PUT', body: payload }),
+  deleteAddress: (id) => apiRequest(`/api/addresses/${id}`, { method: 'DELETE' }),
   voucher: (code, subtotal) => apiRequest(
     `/api/vouchers/check?code=${encodeURIComponent(code)}&orderSubtotal=${encodeURIComponent(subtotal)}`
   ),
@@ -202,6 +213,8 @@ export const api = {
   ),
   checkout: (payload) => apiRequest('/api/orders/checkout', { method: 'POST', body: payload }),
   orders: () => apiRequest('/api/orders'),
+  paymentQrInfo: (orderId) => apiRequest(`/api/orders/${orderId}/payment/qr-info`),
+  paymentQrCode: (orderId) => apiRequest(`/api/orders/${orderId}/payment/qr-code`, { responseType: 'blob' }),
   uploadQr: (orderId, file) => {
     const formData = new FormData();
     formData.append('file', file);

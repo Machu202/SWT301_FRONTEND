@@ -23,12 +23,46 @@ const state = {
   category: 'ALL',
   authTab: 'login',
   checkoutVoucher: '',
-  checkoutPreview: null
+  checkoutPreview: null,
+  profile: null,
+  loginMode: 'username',
+  paymentPollTimer: null
 };
 
-const role = () => state.session?.role?.replace('ROLE_', '') || '';
+const VALID_ROLES = new Set(['ADMIN', 'CUSTOMER']);
+const VIETNAM_PHONE_PATTERN = '^(?:0[35789][0-9]{8}|\+84[35789][0-9]{8})$';
+const role = () => String(state.session?.role || '').replace(/^ROLE_/i, '').trim().toUpperCase();
+const hasValidRole = () => VALID_ROLES.has(role());
 const isAdmin = () => role() === 'ADMIN';
 const isCustomer = () => role() === 'CUSTOMER';
+
+function sanitizePhoneValue(value) {
+  const cleaned = String(value || '').replace(/[^0-9+]/g, '');
+  const withSinglePlus = cleaned.startsWith('+')
+    ? `+${cleaned.slice(1).replaceAll('+', '')}`
+    : cleaned.replaceAll('+', '');
+  return withSinglePlus.slice(0, withSinglePlus.startsWith('+') ? 12 : 10);
+}
+
+function isValidVietnamPhone(value) {
+  return new RegExp(VIETNAM_PHONE_PATTERN).test(String(value || '').trim());
+}
+
+function bindPhoneOnlyInput(input) {
+  if (!input) return;
+  input.addEventListener('input', () => {
+    const cursorAtEnd = input.selectionStart === input.value.length;
+    input.value = sanitizePhoneValue(input.value);
+    if (cursorAtEnd) input.setSelectionRange(input.value.length, input.value.length);
+  });
+}
+
+function stopPaymentPolling() {
+  if (state.paymentPollTimer) {
+    clearInterval(state.paymentPollTimer);
+    state.paymentPollTimer = null;
+  }
+}
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -118,7 +152,10 @@ function showModal({ title, body, footer = '', large = false }) {
 }
 
 function closeModal() {
-  document.querySelector('#active-modal')?.remove();
+  const modal = document.querySelector('#active-modal');
+  const objectUrl = modal?.dataset.objectUrl;
+  if (objectUrl) URL.revokeObjectURL(objectUrl);
+  modal?.remove();
 }
 
 function navItems() {
@@ -127,6 +164,7 @@ function navItems() {
       ['dashboard', '▦', 'Dashboard'],
       ['admin-products', '□', 'Products'],
       ['admin-orders', '≡', 'Orders'],
+      ['profile', '●', 'Profile'],
       ['test-lab', '⌁', 'Test Lab'],
       ['settings', '⚙', 'Settings']
     ];
@@ -138,6 +176,7 @@ function navItems() {
     ['addresses', '⌂', 'Addresses'],
     ['checkout', '✓', 'Checkout'],
     ['orders', '≡', 'My Orders'],
+    ['profile', '●', 'Profile'],
     ['test-lab', '⌁', 'Test Lab'],
     ['settings', '⚙', 'Settings']
   ];
@@ -152,6 +191,7 @@ const viewTitles = {
   orders: ['My Orders', 'Review order and payment workflow states'],
   'admin-products': ['Product Management', 'Create, update, and delete products'],
   'admin-orders': ['Order Administration', 'Update order and payment statuses'],
+  profile: ['My Profile', 'View account details and update full name or phone number'],
   'test-lab': ['Software Test Lab', 'Run API checks and inspect request/response evidence'],
   settings: ['Environment Settings', 'Map database IDs and configure the API endpoint']
 };
@@ -203,9 +243,21 @@ function renderAuth() {
 function loginForm() {
   return `
     <form id="login-form" data-testid="login-form">
-      <div class="field">
-        <label for="login-username">Username</label>
-        <input class="input" id="login-username" name="username" required autocomplete="username" data-testid="login-username" />
+      <div class="form-grid">
+        <div class="field">
+          <label for="login-mode">Login method</label>
+          <select class="select" id="login-mode" name="loginMode" data-testid="login-mode">
+            <option value="username" ${state.loginMode === 'username' ? 'selected' : ''}>Username</option>
+            <option value="phone" ${state.loginMode === 'phone' ? 'selected' : ''}>Vietnamese phone</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="login-identifier">${state.loginMode === 'phone' ? 'Phone number' : 'Username'}</label>
+          <input class="input" id="login-identifier" name="identifier" required
+            ${state.loginMode === 'phone' ? `type="tel" inputmode="tel" maxlength="12" pattern="${VIETNAM_PHONE_PATTERN}" placeholder="0912345678 or +84912345678"` : 'autocomplete="username" minlength="3" maxlength="50"'}
+            data-testid="login-identifier" />
+          ${state.loginMode === 'phone' ? '<p class="help">Only digits and an optional leading + are accepted.</p>' : ''}
+        </div>
       </div>
       <div class="field" style="margin-top:14px">
         <label for="login-password">Password</label>
@@ -218,11 +270,12 @@ function loginForm() {
 function registerForm() {
   return `
     <form id="register-form" data-testid="register-form">
+      <input type="hidden" name="role" value="CUSTOMER" />
       <div class="form-grid">
         <div class="field"><label>Username</label><input class="input" name="username" minlength="3" maxlength="50" required data-testid="register-username" /></div>
-        <div class="field"><label>Full name</label><input class="input" name="fullName" required data-testid="register-full-name" /></div>
+        <div class="field"><label>Full name</label><input class="input" name="fullName" maxlength="100" required data-testid="register-full-name" /></div>
         <div class="field"><label>Email</label><input class="input" name="email" type="email" required data-testid="register-email" /></div>
-        <div class="field"><label>Phone</label><input class="input" name="phone" placeholder="0912345678" data-testid="register-phone" /></div>
+        <div class="field"><label>Vietnamese phone</label><input class="input" id="register-phone" name="phone" type="tel" inputmode="tel" maxlength="12" pattern="${VIETNAM_PHONE_PATTERN}" placeholder="0912345678 or +84912345678" required data-testid="register-phone" /><p class="help">Accepted: 10-digit local number or +84 format. Letters are blocked.</p></div>
       </div>
       <div class="field" style="margin-top:14px"><label>Password</label><input class="input" name="password" type="password" minlength="6" maxlength="40" required data-testid="register-password" /></div>
       <button class="btn btn-primary" style="width:100%;margin-top:20px" type="submit" data-testid="register-submit">Register customer</button>
@@ -236,6 +289,14 @@ function bindAuthEvents() {
       renderAuth();
     });
   });
+
+  const loginMode = document.querySelector('#login-mode');
+  loginMode?.addEventListener('change', () => {
+    state.loginMode = loginMode.value;
+    renderAuth();
+  });
+  if (state.loginMode === 'phone') bindPhoneOnlyInput(document.querySelector('#login-identifier'));
+  bindPhoneOnlyInput(document.querySelector('#register-phone'));
 
   document.querySelector('#connection-check')?.addEventListener('click', async (event) => {
     setBusy(event.currentTarget, true, 'Checking...');
@@ -255,7 +316,11 @@ function bindAuthEvents() {
     const data = new FormData(event.currentTarget);
     setBusy(button, true, 'Signing in...');
     try {
-      const response = await api.login(data.get('username').trim(), data.get('password'));
+      const identifier = data.get('identifier').trim();
+      if (state.loginMode === 'phone' && !isValidVietnamPhone(identifier)) {
+        throw new Error('Phone must be 0xxxxxxxxx or +84xxxxxxxxx.');
+      }
+      const response = await api.login(identifier, data.get('password'));
       const session = {
         token: response.token,
         id: response.id,
@@ -263,8 +328,13 @@ function bindAuthEvents() {
         email: response.email,
         role: response.role
       };
-      saveSession(session);
       state.session = session;
+      if (!hasValidRole()) {
+        state.session = null;
+        clearSession();
+        throw new Error('The account role is invalid and cannot be opened as CUSTOMER.');
+      }
+      saveSession(session);
       state.view = 'dashboard';
       toast(`Logged in as ${session.username}.`);
       renderShell();
@@ -280,6 +350,10 @@ function bindAuthEvents() {
     const button = event.submitter;
     const data = new FormData(event.currentTarget);
     const payload = Object.fromEntries(data.entries());
+    payload.phone = sanitizePhoneValue(payload.phone);
+    if (!isValidVietnamPhone(payload.phone)) {
+      return toast('Phone must be 0xxxxxxxxx or +84xxxxxxxxx.', 'error', 'Invalid phone');
+    }
     setBusy(button, true, 'Registering...');
     try {
       const response = await api.register(payload);
@@ -287,8 +361,8 @@ function bindAuthEvents() {
       state.authTab = 'login';
       renderAuth();
       setTimeout(() => {
-        const username = document.querySelector('#login-username');
-        if (username) username.value = payload.username;
+        const identifier = document.querySelector('#login-identifier');
+        if (identifier) identifier.value = payload.username;
       }, 0);
     } catch (error) {
       toast(error.message, 'error', 'Registration failed');
@@ -300,6 +374,13 @@ function bindAuthEvents() {
 
 function renderShell() {
   if (!state.session) return renderAuth();
+  if (!hasValidRole()) {
+    clearSession();
+    state.session = null;
+    stopPaymentPolling();
+    renderAuth();
+    return toast('This account has an invalid role. Access was blocked instead of defaulting to CUSTOMER.', 'error', 'Invalid role');
+  }
   const [title, subtitle] = viewTitles[state.view] || viewTitles.dashboard;
   app.innerHTML = `
     <div class="app-shell">
@@ -343,11 +424,13 @@ function renderShell() {
 function bindShellEvents() {
   document.querySelectorAll('[data-view]').forEach((button) => {
     button.addEventListener('click', () => {
+      stopPaymentPolling();
       state.view = button.dataset.view;
       renderShell();
     });
   });
   document.querySelector('#logout-button').addEventListener('click', () => {
+    stopPaymentPolling();
     clearSession();
     state.session = null;
     state.cart = null;
@@ -363,6 +446,7 @@ function bindShellEvents() {
 async function renderCurrentView(force = false) {
   const container = document.querySelector('#view-content');
   if (!container) return;
+  if (state.view !== 'orders') stopPaymentPolling();
   container.innerHTML = loading();
   try {
     switch (state.view) {
@@ -374,6 +458,7 @@ async function renderCurrentView(force = false) {
       case 'orders': await renderOrders(container, force); break;
       case 'admin-products': await renderProducts(container, true, force); break;
       case 'admin-orders': await renderAdminOrders(container, force); break;
+      case 'profile': await renderProfile(container, force); break;
       case 'test-lab': renderTestLab(container); break;
       case 'settings': renderSettings(container); break;
       default: await renderDashboard(container);
@@ -457,6 +542,7 @@ async function loadProducts(force = false) {
 
 async function renderProducts(container, adminMode = false, force = false) {
   await loadProducts(force);
+  if (!adminMode && (force || !state.cart)) state.cart = await api.cart();
   const categories = [...new Set(state.products.map((product) => product.categoryName).filter(Boolean))];
   const filtered = state.products.filter((product) => {
     const matchesSearch = `${product.productName} ${product.description || ''}`.toLowerCase().includes(state.search.toLowerCase());
@@ -473,7 +559,11 @@ async function renderProducts(container, adminMode = false, force = false) {
       </select>
       ${adminMode ? '<button class="btn btn-primary" id="create-product" data-testid="create-product">+ New product</button>' : ''}
     </div>
-    ${filtered.length ? `<div class="products">${filtered.map((product) => productCard(product, adminMode)).join('')}</div>` : `<div class="card">${empty('No products found', 'Adjust the search/filter or add products through the admin account.')}</div>`}`;
+    ${filtered.length ? `<div class="products">${filtered.map((product) => {
+      const inCart = state.cart?.items?.find((item) => item.productId === product.productId)?.quantity || 0;
+      const available = Math.max(0, Number(product.stock || 0) - inCart);
+      return productCard(product, adminMode, available, inCart);
+    }).join('')}</div>` : `<div class="card">${empty('No products found', 'Adjust the search/filter or add products through the admin account.')}</div>`}`;
 
   document.querySelector('#product-search').addEventListener('input', (event) => {
     state.search = event.target.value;
@@ -493,7 +583,7 @@ async function renderProducts(container, adminMode = false, force = false) {
   else bindCustomerProductActions(container);
 }
 
-function productCard(product, adminMode) {
+function productCard(product, adminMode, available = Number(product.stock || 0), inCart = 0) {
   const image = product.image
     ? `<img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.productName)}" onerror="this.parentElement.innerHTML='No image'" />`
     : 'No image';
@@ -504,15 +594,15 @@ function productCard(product, adminMode) {
         <div><span class="badge badge-blue">${escapeHtml(product.categoryName || `Category ${product.categoryId}`)}</span></div>
         <h3>${escapeHtml(product.productName)}</h3>
         <p>${escapeHtml(product.description || 'No description')}</p>
-        <div class="product-meta"><span class="price">${money(product.price)}</span><span class="stock">Stock: ${escapeHtml(product.stock)}</span></div>
+        <div class="product-meta"><span class="price">${money(product.price)}</span><span class="stock">${adminMode ? `Stock: ${escapeHtml(product.stock)}` : `Available: ${escapeHtml(available)}${inCart ? ` · In cart: ${escapeHtml(inCart)}` : ''}`}</span></div>
         ${adminMode ? `
           <div class="table-actions">
             <button class="btn btn-secondary btn-sm" data-edit-product="${product.productId}" data-testid="edit-product-${product.productId}">Edit</button>
             <button class="btn btn-danger btn-sm" data-delete-product="${product.productId}" data-testid="delete-product-${product.productId}">Delete</button>
           </div>` : `
           <div class="product-actions">
-            <input class="input" type="number" min="1" max="${Math.max(1, product.stock)}" value="1" id="qty-${product.productId}" aria-label="Quantity" data-testid="quantity-${product.productId}" />
-            <button class="btn btn-primary" data-add-product="${product.productId}" ${product.stock < 1 ? 'disabled' : ''} data-testid="add-cart-${product.productId}">${product.stock < 1 ? 'Out of stock' : 'Add to cart'}</button>
+            <input class="input" type="number" min="1" max="${Math.max(1, available)}" value="1" id="qty-${product.productId}" aria-label="Quantity" data-testid="quantity-${product.productId}" ${available < 1 ? 'disabled' : ''} />
+            <button class="btn btn-primary" data-add-product="${product.productId}" data-available="${available}" ${available < 1 ? 'disabled' : ''} data-testid="add-cart-${product.productId}">${available < 1 ? 'No more available' : 'Add to cart'}</button>
           </div>`}
       </div>
     </article>`;
@@ -524,11 +614,14 @@ function bindCustomerProductActions(container) {
       const productId = Number(button.dataset.addProduct);
       const quantityInput = document.querySelector(`#qty-${productId}`);
       const quantity = Number(quantityInput.value);
+      const available = Number(button.dataset.available);
       if (!Number.isInteger(quantity) || quantity < 1) return toast('Quantity must be an integer greater than 0.', 'error');
+      if (quantity > available) return toast(`Only ${available} more item(s) can be added.`, 'error');
       setBusy(button, true, 'Adding...');
       try {
         state.cart = await api.addCartItem(productId, quantity);
-        toast('Product added to the real backend cart.');
+        toast('Product added. Available stock now reflects the quantity reserved in your cart.');
+        await renderProducts(container, false, false);
       } catch (error) {
         toast(error.message, 'error');
       } finally {
@@ -615,7 +708,7 @@ async function renderCart(container, force = false) {
             <tr data-testid="cart-row-${item.cartItemId}">
               <td><div style="display:flex;align-items:center;gap:10px">${item.productImage ? `<img class="product-thumb" src="${escapeHtml(item.productImage)}" alt="" />` : '<div class="product-thumb"></div>'}<strong>${escapeHtml(item.productName)}</strong></div></td>
               <td>${money(item.unitPrice)}</td>
-              <td><input class="input" style="width:90px" type="number" min="1" value="${item.quantity}" id="cart-qty-${item.productId}" data-testid="cart-quantity-${item.productId}" /></td>
+              <td><input class="input" style="width:90px" type="number" min="1" max="${item.productStock || item.quantity}" value="${item.quantity}" id="cart-qty-${item.productId}" data-testid="cart-quantity-${item.productId}" /><div class="help">Stock: ${escapeHtml(item.productStock ?? 'N/A')}</div></td>
               <td>${money(item.itemSubtotal)}</td>
               <td><div class="table-actions"><button class="btn btn-secondary btn-sm" data-update-cart="${item.productId}">Update</button><button class="btn btn-danger btn-sm" data-remove-cart="${item.cartItemId}">Remove</button></div></td>
             </tr>`).join('')}</tbody>
@@ -626,8 +719,11 @@ async function renderCart(container, force = false) {
 
   container.querySelectorAll('[data-update-cart]').forEach((button) => button.addEventListener('click', async () => {
     const productId = Number(button.dataset.updateCart);
-    const quantity = Number(document.querySelector(`#cart-qty-${productId}`).value);
+    const input = document.querySelector(`#cart-qty-${productId}`);
+    const quantity = Number(input.value);
+    const max = Number(input.max || Number.MAX_SAFE_INTEGER);
     if (!Number.isInteger(quantity) || quantity < 1) return toast('Quantity must be at least 1.', 'error');
+    if (quantity > max) return toast(`Quantity cannot exceed current stock (${max}).`, 'error');
     setBusy(button, true, 'Updating...');
     try {
       state.cart = await api.updateCartItem(productId, quantity);
@@ -666,6 +762,21 @@ async function renderAddresses(container, force = false) {
   container.querySelectorAll('[data-edit-address]').forEach((button) => button.addEventListener('click', () => {
     openAddressModal(state.addresses.find((a) => a.addressId === Number(button.dataset.editAddress)));
   }));
+  container.querySelectorAll('[data-delete-address]').forEach((button) => button.addEventListener('click', async () => {
+    const addressId = Number(button.dataset.deleteAddress);
+    const address = state.addresses.find((item) => item.addressId === addressId);
+    if (!confirm(`Delete the address for ${address?.receiverName || addressId}? Addresses already used by orders cannot be deleted.`)) return;
+    setBusy(button, true, 'Deleting...');
+    try {
+      const response = await api.deleteAddress(addressId);
+      state.addresses = await api.addresses();
+      toast(response.message || 'Address deleted.');
+      renderAddresses(container, false);
+    } catch (error) {
+      toast(error.message, 'error', 'Delete failed');
+      setBusy(button, false);
+    }
+  }));
 }
 
 function addressCard(address) {
@@ -673,7 +784,10 @@ function addressCard(address) {
     <div style="display:flex;justify-content:space-between;gap:10px"><strong>${escapeHtml(address.receiverName)}</strong>${address.isDefault ? '<span class="badge badge-green">Default</span>' : ''}</div>
     <p class="help">${escapeHtml(address.receiverPhone)}</p>
     <p style="font-size:13px;line-height:1.6">${escapeHtml(address.street)}, ${escapeHtml(address.ward)}, ${escapeHtml(address.district)}, ${escapeHtml(address.province)}</p>
-    <button class="btn btn-secondary btn-sm" data-edit-address="${address.addressId}">Edit address</button>
+    <div class="table-actions">
+      <button class="btn btn-secondary btn-sm" data-edit-address="${address.addressId}" data-testid="edit-address-${address.addressId}">Edit address</button>
+      <button class="btn btn-danger btn-sm" data-delete-address="${address.addressId}" data-testid="delete-address-${address.addressId}">Delete address</button>
+    </div>
   </article>`;
 }
 
@@ -684,24 +798,27 @@ function openAddressModal(address = null) {
       <form id="address-form" data-testid="address-form">
         <div class="form-grid">
           <div class="field"><label>Receiver name</label><input class="input" name="receiverName" value="${escapeHtml(address?.receiverName || '')}" required data-testid="receiver-name" /></div>
-          <div class="field"><label>Vietnamese phone</label><input class="input" name="receiverPhone" value="${escapeHtml(address?.receiverPhone || '')}" pattern="^(0|84)(3|5|7|8|9)[0-9]{8}$" required data-testid="receiver-phone" /></div>
+          <div class="field"><label>Vietnamese phone</label><input class="input" id="receiver-phone" name="receiverPhone" type="tel" inputmode="tel" maxlength="12" value="${escapeHtml(address?.receiverPhone || '')}" pattern="${VIETNAM_PHONE_PATTERN}" required data-testid="receiver-phone" /></div>
           <div class="field"><label>Province / City</label><input class="input" name="province" value="${escapeHtml(address?.province || '')}" required data-testid="province" /></div>
           <div class="field"><label>District</label><input class="input" name="district" value="${escapeHtml(address?.district || '')}" required data-testid="district" /></div>
           <div class="field"><label>Ward</label><input class="input" name="ward" value="${escapeHtml(address?.ward || '')}" required data-testid="ward" /></div>
           <div class="field"><label>Street / House number</label><input class="input" name="street" value="${escapeHtml(address?.street || '')}" required data-testid="street" /></div>
         </div>
         <label style="display:flex;align-items:center;gap:8px;margin-top:15px"><input type="checkbox" name="isDefault" ${address?.isDefault ? 'checked' : ''} /> Set as default address</label>
-        <p class="help">Accepted phone format from the backend: 0/84 + 3,5,7,8,9 + eight digits.</p>
+        <p class="help">Accepted: 0912345678 or +84912345678. Letters and extra digits are blocked.</p>
       </form>`,
     footer: `<button class="btn btn-secondary" data-close-modal>Cancel</button><button class="btn btn-primary" id="save-address" data-testid="save-address">Save address</button>`
   });
+  bindPhoneOnlyInput(document.querySelector('#receiver-phone'));
   document.querySelector('#save-address').addEventListener('click', async (event) => {
     const form = document.querySelector('#address-form');
     if (!form.reportValidity()) return;
     const data = new FormData(form);
+    const phone = sanitizePhoneValue(data.get('receiverPhone'));
+    if (!isValidVietnamPhone(phone)) return toast('Phone must be 0xxxxxxxxx or +84xxxxxxxxx.', 'error');
     const payload = {
       receiverName: data.get('receiverName').trim(),
-      receiverPhone: data.get('receiverPhone').trim(),
+      receiverPhone: phone,
       province: data.get('province').trim(),
       district: data.get('district').trim(),
       ward: data.get('ward').trim(),
@@ -735,6 +852,58 @@ function openAddressModal(address = null) {
   });
 }
 
+
+async function renderProfile(container, force = false) {
+  if (force || !state.profile) state.profile = await api.profile();
+  const profile = state.profile;
+  container.innerHTML = `
+    <div class="grid grid-2">
+      <section class="card card-pad">
+        <h3 style="margin-top:0">Account profile</h3>
+        <form id="profile-form" data-testid="profile-form">
+          <div class="field"><label>Username</label><input class="input" value="${escapeHtml(profile.username)}" readonly data-testid="profile-username" /><p class="help">Username is read-only so the current JWT remains valid.</p></div>
+          <div class="field" style="margin-top:14px"><label>Email</label><input class="input" value="${escapeHtml(profile.email || '')}" readonly data-testid="profile-email" /></div>
+          <div class="field" style="margin-top:14px"><label>Full name</label><input class="input" name="fullName" maxlength="100" value="${escapeHtml(profile.fullName || '')}" required data-testid="profile-full-name" /></div>
+          <div class="field" style="margin-top:14px"><label>Vietnamese phone</label><input class="input" id="profile-phone" name="phone" type="tel" inputmode="tel" maxlength="12" pattern="${VIETNAM_PHONE_PATTERN}" value="${escapeHtml(profile.phone || '')}" required data-testid="profile-phone" /><p class="help">Accepted: 10-digit local number or +84 format.</p></div>
+          <div class="form-actions"><button class="btn btn-primary" type="submit" data-testid="save-profile">Save profile</button></div>
+        </form>
+      </section>
+      <section class="card card-pad">
+        <h3 style="margin-top:0">Account information</h3>
+        <div class="test-case"><h4>Role</h4><p>${escapeHtml(profile.role)}</p></div>
+        <div class="test-case"><h4>User ID</h4><p>${escapeHtml(profile.userId)}</p></div>
+        <div class="test-case"><h4>Role validation</h4><p>Only CUSTOMER and ADMIN sessions are accepted. Unknown roles are blocked instead of being shown as Customer.</p></div>
+      </section>
+    </div>`;
+  bindPhoneOnlyInput(document.querySelector('#profile-phone'));
+  document.querySelector('#profile-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!event.currentTarget.reportValidity()) return;
+    const button = event.submitter;
+    const data = new FormData(event.currentTarget);
+    const phone = sanitizePhoneValue(data.get('phone'));
+    if (!isValidVietnamPhone(phone)) return toast('Phone must be 0xxxxxxxxx or +84xxxxxxxxx.', 'error');
+    setBusy(button, true, 'Saving...');
+    try {
+      state.profile = await api.updateProfile({ fullName: data.get('fullName').trim(), phone });
+      state.session = { ...state.session, fullName: state.profile.fullName, phone: state.profile.phone };
+      saveSession(state.session);
+      toast('Profile updated successfully.');
+      renderProfile(container, false);
+    } catch (error) {
+      toast(error.message, 'error', 'Profile update failed');
+      setBusy(button, false);
+    }
+  });
+}
+
+function paymentMethodHelp(paymentMethodId, config) {
+  const isQr = Number(paymentMethodId) === Number(config.paymentMethodQrId);
+  return isQr
+    ? '<div class="payment-help qr"><strong>QR online payment</strong><p>The order is created as PENDING with payment status AWAITING_PAYMENT. A QR code is generated immediately. After the receipt is uploaded and Admin verifies it, this page displays “Payment successful”.</p></div>'
+    : '<div class="payment-help cod"><strong>Cash on delivery (COD)</strong><p>Pay the courier when the order arrives. The order and payment remain PENDING until the delivery workflow is completed.</p></div>';
+}
+
 async function renderCheckout(container, force = false) {
   const [cart, addresses] = await Promise.all([
     force || !state.cart ? api.cart() : Promise.resolve(state.cart),
@@ -743,6 +912,7 @@ async function renderCheckout(container, force = false) {
   state.cart = cart;
   state.addresses = addresses;
   const config = getConfig();
+  const initialAddressMode = state.addresses.length ? 'saved' : 'manual';
 
   if (!cart.items?.length) {
     container.innerHTML = `<div class="card">${empty('Checkout unavailable', 'The backend requires at least one cart item.')}</div>`;
@@ -754,12 +924,47 @@ async function renderCheckout(container, force = false) {
       <section class="card card-pad">
         <h3 style="margin-top:0">Order details</h3>
         <form id="checkout-form" data-testid="checkout-form">
-          <div class="field"><label>Delivery address</label><select class="select" name="addressId" required data-testid="checkout-address"><option value="">Select address</option>${state.addresses.map((a) => `<option value="${a.addressId}" ${a.isDefault ? 'selected' : ''}>${escapeHtml(a.receiverName)} — ${escapeHtml(a.street)}, ${escapeHtml(a.ward)}</option>`).join('')}</select></div>
-          <div class="field" style="margin-top:14px"><label>Payment method</label><select class="select" name="paymentMethodId" required data-testid="payment-method"><option value="${config.paymentMethodCodId}">COD (database ID ${config.paymentMethodCodId})</option><option value="${config.paymentMethodQrId}">QR_CODE (database ID ${config.paymentMethodQrId})</option></select></div>
+          <fieldset class="address-mode-group">
+            <legend>Delivery address</legend>
+            <div class="address-mode-options" role="radiogroup" aria-label="Delivery address source">
+              <label class="address-mode-option ${state.addresses.length ? '' : 'disabled'}">
+                <input type="radio" name="addressMode" value="saved" ${initialAddressMode === 'saved' ? 'checked' : ''} ${state.addresses.length ? '' : 'disabled'} data-testid="address-mode-saved" />
+                <span><strong>Choose a saved address</strong><small>Select one of the addresses from your account.</small></span>
+              </label>
+              <label class="address-mode-option">
+                <input type="radio" name="addressMode" value="manual" ${initialAddressMode === 'manual' ? 'checked' : ''} data-testid="address-mode-manual" />
+                <span><strong>Enter an address manually</strong><small>Type the delivery details directly during checkout.</small></span>
+              </label>
+            </div>
+          </fieldset>
+
+          <div id="saved-address-panel" class="checkout-address-panel">
+            <div class="field">
+              <label>Saved address</label>
+              <select class="select" name="addressId" data-testid="checkout-address">
+                <option value="">Select address</option>
+                ${state.addresses.map((a) => `<option value="${a.addressId}" ${a.isDefault ? 'selected' : ''}>${escapeHtml(a.receiverName)} — ${escapeHtml(a.street)}, ${escapeHtml(a.ward)}, ${escapeHtml(a.district)}, ${escapeHtml(a.province)}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+
+          <div id="manual-address-panel" class="checkout-address-panel" hidden>
+            <div class="form-grid">
+              <div class="field"><label>Receiver name</label><input class="input" name="manualReceiverName" maxlength="100" autocomplete="name" data-testid="checkout-manual-receiver-name" /></div>
+              <div class="field"><label>Vietnamese phone</label><input class="input" id="checkout-manual-phone" name="manualReceiverPhone" type="tel" inputmode="tel" maxlength="12" pattern="${VIETNAM_PHONE_PATTERN}" autocomplete="tel" placeholder="0912345678 or +84912345678" data-testid="checkout-manual-phone" /></div>
+              <div class="field"><label>Province / City</label><input class="input" name="manualProvince" maxlength="100" autocomplete="address-level1" data-testid="checkout-manual-province" /></div>
+              <div class="field"><label>District</label><input class="input" name="manualDistrict" maxlength="100" autocomplete="address-level2" data-testid="checkout-manual-district" /></div>
+              <div class="field"><label>Ward</label><input class="input" name="manualWard" maxlength="100" autocomplete="address-level3" data-testid="checkout-manual-ward" /></div>
+              <div class="field"><label>Street / House number</label><input class="input" name="manualStreet" maxlength="255" autocomplete="street-address" data-testid="checkout-manual-street" /></div>
+            </div>
+            <p class="help checkout-address-note">The backend stores this address so it can remain attached to the order history.</p>
+          </div>
+
+          <div class="field" style="margin-top:14px"><label>Payment method</label><select class="select" id="payment-method" name="paymentMethodId" required data-testid="payment-method"><option value="${config.paymentMethodCodId}">COD — pay when receiving the order</option><option value="${config.paymentMethodQrId}">QR_CODE — online payment</option></select></div>
+          <div id="payment-method-help">${paymentMethodHelp(config.paymentMethodCodId, config)}</div>
           <div class="field" style="margin-top:14px"><label>Voucher code</label><div style="display:flex;gap:8px"><input class="input" name="voucherCode" id="checkout-voucher" value="${escapeHtml(state.checkoutVoucher)}" placeholder="Optional" data-testid="checkout-voucher" /><button type="button" class="btn btn-secondary" id="preview-order" data-testid="preview-order">Preview</button></div></div>
           <div class="field" style="margin-top:14px"><label>Order note</label><textarea class="textarea" name="note" maxlength="500" data-testid="checkout-note"></textarea></div>
-          ${state.addresses.length ? '' : '<p class="error-text">Create an address before placing an order.</p>'}
-          <button class="btn btn-primary" type="submit" style="width:100%;margin-top:18px" ${state.addresses.length ? '' : 'disabled'} data-testid="place-order">Place real order</button>
+          <button class="btn btn-primary" type="submit" style="width:100%;margin-top:18px" data-testid="place-order">Place order</button>
         </form>
       </section>
       <section class="card">
@@ -767,6 +972,42 @@ async function renderCheckout(container, force = false) {
         <div id="preview-panel">${state.checkoutPreview ? previewMarkup(state.checkoutPreview) : '<div class="card-pad"><p class="help">Click Preview to execute GET /api/orders/preview.</p></div>'}</div>
       </section>
     </div>`;
+
+  const checkoutForm = document.querySelector('#checkout-form');
+  const savedAddressPanel = document.querySelector('#saved-address-panel');
+  const manualAddressPanel = document.querySelector('#manual-address-panel');
+  const savedAddressSelect = checkoutForm.elements.addressId;
+  const manualAddressInputs = [
+    checkoutForm.elements.manualReceiverName,
+    checkoutForm.elements.manualReceiverPhone,
+    checkoutForm.elements.manualProvince,
+    checkoutForm.elements.manualDistrict,
+    checkoutForm.elements.manualWard,
+    checkoutForm.elements.manualStreet
+  ];
+
+  function setCheckoutAddressMode(mode) {
+    const useManual = mode === 'manual';
+    savedAddressPanel.hidden = useManual;
+    manualAddressPanel.hidden = !useManual;
+    savedAddressSelect.disabled = useManual;
+    savedAddressSelect.required = !useManual;
+    manualAddressInputs.forEach((input) => {
+      input.disabled = !useManual;
+      input.required = useManual;
+    });
+  }
+
+  setCheckoutAddressMode(initialAddressMode);
+  bindPhoneOnlyInput(document.querySelector('#checkout-manual-phone'));
+
+  checkoutForm.querySelectorAll('input[name="addressMode"]').forEach((radio) => {
+    radio.addEventListener('change', (event) => setCheckoutAddressMode(event.target.value));
+  });
+
+  document.querySelector('#payment-method').addEventListener('change', (event) => {
+    document.querySelector('#payment-method-help').innerHTML = paymentMethodHelp(event.target.value, config);
+  });
 
   document.querySelector('#preview-order').addEventListener('click', async (event) => {
     state.checkoutVoucher = document.querySelector('#checkout-voucher').value.trim();
@@ -782,26 +1023,65 @@ async function renderCheckout(container, force = false) {
     }
   });
 
-  document.querySelector('#checkout-form').addEventListener('submit', async (event) => {
+  checkoutForm.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (!event.currentTarget.reportValidity()) return;
-    if (!confirm('Create this order in the real backend and clear the current cart?')) return;
     const data = new FormData(event.currentTarget);
-    const payload = {
-      addressId: Number(data.get('addressId')),
-      paymentMethodId: Number(data.get('paymentMethodId')),
-      voucherCode: data.get('voucherCode').trim() || null,
-      note: data.get('note').trim()
-    };
-    setBusy(event.submitter, true, 'Creating order...');
+    const addressMode = data.get('addressMode');
+    const paymentMethodId = Number(data.get('paymentMethodId'));
+    const isQr = paymentMethodId === Number(config.paymentMethodQrId);
+    const methodLabel = isQr ? 'QR online payment' : 'cash on delivery';
+    const addressLabel = addressMode === 'manual' ? 'the manually entered address' : 'the selected saved address';
+    if (!confirm(`Create this order using ${addressLabel} and ${methodLabel}? Stock will be deducted by the backend and the cart will be cleared.`)) return;
+
+    setBusy(event.submitter, true, addressMode === 'manual' ? 'Saving address...' : 'Creating order...');
     try {
+      let addressId;
+      if (addressMode === 'manual') {
+        const receiverPhone = sanitizePhoneValue(data.get('manualReceiverPhone'));
+        if (!isValidVietnamPhone(receiverPhone)) {
+          throw new Error('Phone must be 0xxxxxxxxx or +84xxxxxxxxx.');
+        }
+        const createdAddress = await api.createAddress({
+          receiverName: String(data.get('manualReceiverName') || '').trim(),
+          receiverPhone,
+          province: String(data.get('manualProvince') || '').trim(),
+          district: String(data.get('manualDistrict') || '').trim(),
+          ward: String(data.get('manualWard') || '').trim(),
+          street: String(data.get('manualStreet') || '').trim(),
+          isDefault: false
+        });
+        addressId = Number(createdAddress.addressId);
+        if (!Number.isInteger(addressId) || addressId <= 0) {
+          throw new Error('The backend did not return a valid address ID.');
+        }
+        state.addresses.push(createdAddress);
+        setBusy(event.submitter, true, 'Creating order...');
+      } else {
+        addressId = Number(data.get('addressId'));
+      }
+
+      const payload = {
+        addressId,
+        paymentMethodId,
+        voucherCode: String(data.get('voucherCode') || '').trim() || null,
+        note: String(data.get('note') || '').trim()
+      };
       const order = await api.checkout(payload);
-      toast(`Order ${order.orderCode} created.`);
       state.cart = null;
+      state.products = [];
+      state.orders = [];
       state.checkoutPreview = null;
       state.checkoutVoucher = '';
       state.view = 'orders';
-      renderShell();
+      if (isQr) {
+        toast(`Order ${order.orderCode} created. Scan the QR and upload the receipt.`);
+        renderShell();
+        setTimeout(() => openPaymentQrModal(order.orderId), 0);
+      } else {
+        toast(`Order ${order.orderCode} is PENDING. Pay when the courier delivers it.`);
+        renderShell();
+      }
     } catch (error) {
       toast(error.message, 'error', 'Checkout failed');
       setBusy(event.submitter, false);
@@ -821,14 +1101,101 @@ function previewMarkup(preview) {
   </div>`;
 }
 
+function openPaymentQrModal(orderId) {
+  showModal({
+    title: `QR payment for order #${orderId}`,
+    body: `<div id="payment-qr-content">${loading('Generating QR code...')}</div>`,
+    footer: '<button class="btn btn-secondary" data-close-modal>Close</button><button class="btn btn-primary" id="payment-upload-receipt" data-testid="payment-upload-receipt">Upload payment receipt</button>'
+  });
+  document.querySelector('#payment-upload-receipt').addEventListener('click', () => {
+    closeModal();
+    openQrModal(orderId);
+  });
+
+  Promise.all([api.paymentQrInfo(orderId), api.paymentQrCode(orderId)])
+    .then(([info, blob]) => {
+      const modal = document.querySelector('#active-modal');
+      if (!modal) return;
+      const objectUrl = URL.createObjectURL(blob);
+      modal.dataset.objectUrl = objectUrl;
+      document.querySelector('#payment-qr-content').innerHTML = `
+        <div class="payment-qr">
+          <img src="${objectUrl}" alt="Payment QR for ${escapeHtml(info.orderCode)}" data-testid="payment-qr-image" />
+          <div>
+            <span class="badge badge-blue">${escapeHtml(info.paymentStatus)}</span>
+            <h3>${escapeHtml(info.orderCode)}</h3>
+            <p class="qr-amount">${money(info.amount)}</p>
+            <p class="help">This testing QR contains the order code and amount. After paying, upload a receipt. Admin confirmation changes the payment status to PAID.</p>
+            <code class="qr-content">${escapeHtml(info.qrContent)}</code>
+          </div>
+        </div>`;
+      if (String(info.paymentStatus).toUpperCase() === 'PAID') {
+        document.querySelector('#payment-upload-receipt')?.remove();
+      }
+    })
+    .catch((error) => {
+      const content = document.querySelector('#payment-qr-content');
+      if (content) content.innerHTML = `<div class="empty"><strong>Unable to generate QR</strong>${escapeHtml(error.message)}</div>`;
+    });
+}
+
 async function renderOrders(container, force = false) {
   if (force || !state.orders.length) state.orders = await api.orders();
-  container.innerHTML = `<div class="grid">${state.orders.length ? state.orders.map(orderCard).join('') : `<div class="card">${empty('No order history', 'Complete checkout to create an order.')}</div>`}</div>`;
+  stopPaymentPolling();
+  container.innerHTML = `
+    <div class="toolbar" style="justify-content:flex-end"><button class="btn btn-secondary" id="refresh-payment-status" data-testid="refresh-payment-status">↻ Refresh payment status</button></div>
+    <div class="grid">${state.orders.length ? state.orders.map(orderCard).join('') : `<div class="card">${empty('No order history', 'Complete checkout to create an order.')}</div>`}</div>`;
+  document.querySelector('#refresh-payment-status').addEventListener('click', async (event) => {
+    setBusy(event.currentTarget, true, 'Refreshing...');
+    try {
+      state.orders = await api.orders();
+      await renderOrders(container, false);
+      toast('Order and payment statuses refreshed.');
+    } catch (error) {
+      toast(error.message, 'error');
+      setBusy(event.currentTarget, false);
+    }
+  });
+  container.querySelectorAll('[data-show-payment-qr]').forEach((button) => button.addEventListener('click', () => openPaymentQrModal(Number(button.dataset.showPaymentQr))));
   container.querySelectorAll('[data-upload-qr]').forEach((button) => button.addEventListener('click', () => openQrModal(Number(button.dataset.uploadQr))));
+
+  if (state.orders.some((order) => String(order.paymentStatus).toUpperCase() === 'PENDING_VERIFICATION')) {
+    let polling = false;
+    state.paymentPollTimer = setInterval(async () => {
+      if (polling || state.view !== 'orders') return;
+      polling = true;
+      try {
+        const previousPaid = new Set(state.orders.filter((order) => String(order.paymentStatus).toUpperCase() === 'PAID').map((order) => order.orderId));
+        const freshOrders = await api.orders();
+        const newlyPaid = freshOrders.find((order) => String(order.paymentStatus).toUpperCase() === 'PAID' && !previousPaid.has(order.orderId));
+        state.orders = freshOrders;
+        if (newlyPaid) toast(`Payment successful for ${newlyPaid.orderCode}.`, 'success', 'Payment successful');
+        await renderOrders(container, false);
+      } catch {
+        // A temporary polling failure should not replace the current screen.
+      } finally {
+        polling = false;
+      }
+    }, 5000);
+  }
 }
 
 function orderCard(order) {
-  const canUpload = String(order.paymentMethod).toUpperCase() === 'QR_CODE' && ['AWAITING_PAYMENT', 'FAILED'].includes(String(order.paymentStatus).toUpperCase());
+  const method = String(order.paymentMethod || '').toUpperCase();
+  const paymentStatus = String(order.paymentStatus || '').toUpperCase();
+  const isQr = method === 'QR_CODE';
+  const canUpload = isQr && ['AWAITING_PAYMENT', 'FAILED'].includes(paymentStatus);
+  const canShowQr = isQr && paymentStatus !== 'PAID';
+  let paymentMessage = '';
+  if (paymentStatus === 'PAID') {
+    paymentMessage = '<div class="payment-result success"><strong>✓ Payment successful</strong><span>The online payment has been verified.</span></div>';
+  } else if (isQr && paymentStatus === 'PENDING_VERIFICATION') {
+    paymentMessage = '<div class="payment-result pending"><strong>Receipt submitted</strong><span>Waiting for Admin verification. This page checks automatically every 5 seconds.</span></div>';
+  } else if (isQr) {
+    paymentMessage = '<div class="payment-result info"><strong>QR payment required</strong><span>Scan the QR and upload a receipt to continue.</span></div>';
+  } else {
+    paymentMessage = '<div class="payment-result info"><strong>Cash on delivery</strong><span>Pay when receiving the order. The order remains PENDING.</span></div>';
+  }
   return `<article class="card order-card" data-testid="order-${order.orderId}">
     <div class="order-head"><div><h3>${escapeHtml(order.orderCode)}</h3><p>${dateTime(order.createdAt)}</p></div><div style="display:flex;gap:7px;flex-wrap:wrap">${statusBadge(order.status)}${statusBadge(order.paymentStatus)}</div></div>
     <div class="order-meta">
@@ -837,15 +1204,19 @@ function orderCard(order) {
       <div><span>Receiver</span><strong>${escapeHtml(order.receiverName)}</strong></div>
       <div><span>Phone</span><strong>${escapeHtml(order.receiverPhone)}</strong></div>
     </div>
+    ${paymentMessage}
     <p class="help">${escapeHtml(order.shippingAddress)}</p>
-    <div class="order-actions">${canUpload ? `<button class="btn btn-primary btn-sm" data-upload-qr="${order.orderId}" data-testid="upload-qr-${order.orderId}">Upload QR receipt</button>` : ''}</div>
+    <div class="order-actions">
+      ${canShowQr ? `<button class="btn btn-secondary btn-sm" data-show-payment-qr="${order.orderId}" data-testid="show-payment-qr-${order.orderId}">Show payment QR</button>` : ''}
+      ${canUpload ? `<button class="btn btn-primary btn-sm" data-upload-qr="${order.orderId}" data-testid="upload-qr-${order.orderId}">Upload payment receipt</button>` : ''}
+    </div>
   </article>`;
 }
 
 function openQrModal(orderId) {
   showModal({
     title: `Upload receipt for order #${orderId}`,
-    body: `<form id="qr-form"><div class="field"><label>JPG or PNG, maximum 5 MB</label><input class="input" type="file" id="qr-file" accept="image/jpeg,image/png" required data-testid="qr-file" /></div><p class="help">A successful upload changes payment status to PENDING_VERIFICATION.</p></form>`,
+    body: `<form id="qr-form"><div class="field"><label>JPG or PNG, maximum 5 MB</label><input class="input" type="file" id="qr-file" accept="image/jpeg,image/png" required data-testid="qr-file" /></div><p class="help">A successful upload changes payment status to PENDING_VERIFICATION. Admin must confirm the receipt before the customer sees “Payment successful”.</p></form>`,
     footer: '<button class="btn btn-secondary" data-close-modal>Cancel</button><button class="btn btn-primary" id="upload-qr-submit" data-testid="upload-qr-submit">Upload receipt</button>'
   });
   document.querySelector('#upload-qr-submit').addEventListener('click', async (event) => {
@@ -860,7 +1231,7 @@ function openQrModal(orderId) {
       toast(response.message || 'Receipt uploaded.');
       closeModal();
       state.orders = [];
-      renderCurrentView();
+      renderCurrentView(true);
     } catch (error) {
       toast(error.message, 'error');
       setBusy(event.currentTarget, false);
@@ -878,9 +1249,19 @@ async function renderAdminOrders(container, force = false) {
   const config = getConfig();
   container.innerHTML = `
     <section class="card">
-      <div class="card-header"><div><h3>All system orders</h3><p>Status IDs are configurable in Settings because the backend has no status-list endpoint.</p></div></div>
+      <div class="card-header"><div><h3>All system orders</h3><p>COD orders do not require payment verification. QR receipts can be marked PAID or FAILED.</p></div></div>
       ${state.adminOrders.length ? `<div class="table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Order status</th><th>Payment</th><th>Total</th><th>Actions</th></tr></thead><tbody>
-        ${state.adminOrders.map((order) => `<tr data-testid="admin-order-${order.orderId}"><td><strong>${escapeHtml(order.orderCode)}</strong><div class="help">#${order.orderId} · ${dateTime(order.createdAt)}</div></td><td>${escapeHtml(order.receiverName)}<div class="help">${escapeHtml(order.receiverPhone)}</div></td><td>${statusBadge(order.status)}<select class="select" style="margin-top:7px;min-width:140px" id="status-${order.orderId}">${Object.entries(config.statusIds).map(([name,id]) => `<option value="${id}">${name} (ID ${id})</option>`).join('')}</select></td><td>${statusBadge(order.paymentStatus)}<select class="select" style="margin-top:7px;min-width:150px" id="payment-${order.orderId}"><option value="PAID">PAID</option><option value="FAILED">FAILED</option><option value="PENDING_VERIFICATION">PENDING_VERIFICATION</option></select></td><td>${money(order.total)}</td><td><div class="table-actions"><button class="btn btn-secondary btn-sm" data-update-status="${order.orderId}">Update status</button><button class="btn btn-success btn-sm" data-update-payment="${order.orderId}">Update payment</button></div></td></tr>`).join('')}
+        ${state.adminOrders.map((order) => {
+          const isQr = String(order.paymentMethod || '').toUpperCase() === 'QR_CODE';
+          return `<tr data-testid="admin-order-${order.orderId}">
+            <td><strong>${escapeHtml(order.orderCode)}</strong><div class="help">#${order.orderId} · ${dateTime(order.createdAt)}</div></td>
+            <td>${escapeHtml(order.receiverName)}<div class="help">${escapeHtml(order.receiverPhone)}</div></td>
+            <td>${statusBadge(order.status)}<select class="select" style="margin-top:7px;min-width:140px" id="status-${order.orderId}">${Object.entries(config.statusIds).map(([name,id]) => `<option value="${id}">${name} (ID ${id})</option>`).join('')}</select></td>
+            <td>${statusBadge(order.paymentStatus)}<div class="help">${escapeHtml(order.paymentMethod)}</div>${isQr ? `<select class="select" style="margin-top:7px;min-width:150px" id="payment-${order.orderId}"><option value="PAID">PAID</option><option value="FAILED">FAILED</option><option value="PENDING_VERIFICATION">PENDING_VERIFICATION</option></select>` : '<div class="help">Pay on delivery; no QR verification.</div>'}</td>
+            <td>${money(order.total)}</td>
+            <td><div class="table-actions"><button class="btn btn-secondary btn-sm" data-update-status="${order.orderId}">Update status</button>${isQr ? `<button class="btn btn-success btn-sm" data-update-payment="${order.orderId}">Verify payment</button>` : ''}</div></td>
+          </tr>`;
+        }).join('')}
       </tbody></table></div>` : empty('No system orders', 'Create an order using a customer account.')}
     </section>`;
 
@@ -904,7 +1285,7 @@ async function renderAdminOrders(container, force = false) {
     setBusy(button, true, 'Updating...');
     try {
       await api.verifyPayment(orderId, paymentStatus);
-      toast('Payment status updated.');
+      toast(paymentStatus === 'PAID' ? 'Payment verified successfully.' : 'Payment status updated.');
       state.adminOrders = [];
       renderCurrentView();
     } catch (error) {
