@@ -265,3 +265,15 @@ td { font-size: 13px; }
 @media (max-width: 700px) {
   .status-pair { justify-content: flex-start; }
 }
+
+.password-input-wrap { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: stretch; }
+.password-toggle { min-width: 72px; }
+.order-success { text-align: center; }
+.order-success-icon { width: 58px; height: 58px; margin: 0 auto 12px; display: grid; place-items: center; border-radius: 50%; background: var(--green-soft); color: var(--green); font-size: 30px; font-weight: 900; }
+.order-success h3 { margin: 0 0 7px; }
+.order-success > p { color: var(--muted); }
+.order-success .order-meta { text-align: left; grid-template-columns: repeat(3,minmax(0,1fr)); }
+@media (max-width: 520px) {
+  .password-input-wrap { grid-template-columns: 1fr; }
+  .order-success .order-meta { grid-template-columns: 1fr; }
+}

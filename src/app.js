@@ -93,6 +93,15 @@ function normalizeName(value) {
   return String(value || '').trim().toUpperCase();
 }
 
+function canonicalPaymentMethodName(value) {
+  const normalized = normalizeName(value)
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (['COD', 'CASH_ON_DELIVERY', 'CASH_DELIVERY', 'CASH'].includes(normalized) || normalized.startsWith('COD_')) return 'COD';
+  if (['QR', 'QR_CODE', 'QRCODE', 'QR_PAYMENT', 'ONLINE_QR'].includes(normalized) || normalized.startsWith('QR_') || normalized.includes('QRCODE')) return 'QR_CODE';
+  return normalized;
+}
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -300,7 +309,10 @@ function loginForm() {
       </div>
       <div class="field" style="margin-top:14px">
         <label for="login-password">Password</label>
-        <input class="input" id="login-password" name="password" type="password" required autocomplete="current-password" data-testid="login-password" />
+        <div class="password-input-wrap">
+          <input class="input" id="login-password" name="password" type="password" required autocomplete="current-password" data-testid="login-password" />
+          <button class="btn btn-secondary password-toggle" type="button" id="toggle-login-password" aria-pressed="false" data-testid="toggle-login-password">Show</button>
+        </div>
       </div>
       <button class="btn btn-primary" style="width:100%;margin-top:20px" type="submit" data-testid="login-submit">Login</button>
     </form>`;
@@ -336,6 +348,15 @@ function bindAuthEvents() {
   });
   if (state.loginMode === 'phone') bindPhoneOnlyInput(document.querySelector('#login-identifier'));
   bindPhoneOnlyInput(document.querySelector('#register-phone'));
+
+  document.querySelector('#toggle-login-password')?.addEventListener('click', (event) => {
+    const passwordInput = document.querySelector('#login-password');
+    const showPassword = passwordInput.type === 'password';
+    passwordInput.type = showPassword ? 'text' : 'password';
+    event.currentTarget.textContent = showPassword ? 'Hide' : 'Show';
+    event.currentTarget.setAttribute('aria-pressed', String(showPassword));
+    passwordInput.focus();
+  });
 
   document.querySelector('#connection-check')?.addEventListener('click', async (event) => {
     setBusy(event.currentTarget, true, 'Checking...');
@@ -968,19 +989,16 @@ async function renderCheckout(container, force = false) {
   state.cart = cart;
   state.addresses = addresses;
   state.paymentMethods = (Array.isArray(paymentMethods) ? paymentMethods : [])
-    .filter((method) => Number(method.paymentMethodId) > 0 && ['COD', 'QR_CODE'].includes(normalizeName(method.methodName)));
+    .map((method) => ({ ...method, methodName: canonicalPaymentMethodName(method.methodName) }))
+    .filter((method) => Number(method.paymentMethodId) > 0 && ['COD', 'QR_CODE'].includes(method.methodName));
 
   const initialAddressMode = state.addresses.length ? 'saved' : 'manual';
-  const initialPaymentMethod = state.paymentMethods.find((method) => normalizeName(method.methodName) === 'COD')
+  const initialPaymentMethod = state.paymentMethods.find((method) => method.methodName === 'COD')
+    || state.paymentMethods.find((method) => method.methodName === 'QR_CODE')
     || state.paymentMethods[0];
-  const previewIsCurrent = Boolean(
-    state.checkoutPreview
-    && state.checkoutPreviewVoucher !== null
-    && state.checkoutPreviewVoucher === state.checkoutVoucher
-  );
 
   if (!cart.items?.length) {
-    container.innerHTML = `<div class="card">${empty('Checkout unavailable', 'The backend requires at least one cart item.')}</div>`;
+    container.innerHTML = `<div class="card">${empty('Checkout require at least one cart item', 'Add at least one product to the cart before opening checkout.')}</div>`;
     return;
   }
   if (!state.paymentMethods.length) {
@@ -1026,7 +1044,7 @@ async function renderCheckout(container, force = false) {
               <div class="field"><label>Ward</label><input class="input" name="manualWard" maxlength="100" autocomplete="address-level3" data-testid="checkout-manual-ward" /></div>
               <div class="field"><label>Street / House number</label><input class="input" name="manualStreet" maxlength="255" autocomplete="street-address" data-testid="checkout-manual-street" /></div>
             </div>
-            <p class="help checkout-address-note">The backend stores this address so it can remain attached to the order history.</p>
+            <p class="help checkout-address-note">The backend stores this address so it remains attached to the order history.</p>
           </div>
 
           <fieldset class="address-mode-group payment-method-group" style="margin-top:14px">
@@ -1035,21 +1053,25 @@ async function renderCheckout(container, force = false) {
               ${state.paymentMethods.map((method) => {
                 const [label, help] = paymentMethodLabel(method.methodName);
                 return `<label class="address-mode-option">
-                  <input type="radio" name="paymentMethodId" value="${method.paymentMethodId}" ${Number(method.paymentMethodId) === Number(initialPaymentMethod.paymentMethodId) ? 'checked' : ''} data-method-name="${escapeHtml(method.methodName)}" data-testid="payment-method-${normalizeName(method.methodName).toLowerCase()}" />
+                  <input type="radio" name="paymentMethodId" value="${method.paymentMethodId}" ${Number(method.paymentMethodId) === Number(initialPaymentMethod.paymentMethodId) ? 'checked' : ''} data-method-name="${escapeHtml(method.methodName)}" data-testid="payment-method-${method.methodName.toLowerCase()}" />
                   <span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(help)}</small></span>
                 </label>`;
               }).join('')}
             </div>
           </fieldset>
           <div id="payment-method-help">${paymentMethodHelp(initialPaymentMethod.methodName)}</div>
-          <div class="field" style="margin-top:14px"><label>Voucher code</label><div style="display:flex;gap:8px"><input class="input" name="voucherCode" id="checkout-voucher" value="${escapeHtml(state.checkoutVoucher)}" placeholder="Optional" data-testid="checkout-voucher" /><button type="button" class="btn btn-secondary" id="preview-order" data-testid="preview-order">Preview</button></div><p class="help">Any voucher edit clears the previous price result. Preview again before placing the order.</p></div>
+          <div class="field" style="margin-top:14px">
+            <label>Voucher code</label>
+            <input class="input" name="voucherCode" id="checkout-voucher" value="${escapeHtml(state.checkoutVoucher)}" placeholder="Optional" autocomplete="off" data-testid="checkout-voucher" />
+            <p class="help">The backend price preview appears automatically and refreshes whenever the voucher changes.</p>
+          </div>
           <div class="field" style="margin-top:14px"><label>Order note</label><textarea class="textarea" name="note" maxlength="500" data-testid="checkout-note"></textarea></div>
-          <button class="btn btn-primary" type="submit" style="width:100%;margin-top:18px" data-testid="place-order" ${previewIsCurrent ? '' : 'disabled'}>Place order</button>
+          <button class="btn btn-primary" type="submit" style="width:100%;margin-top:18px" data-testid="place-order" disabled>Place order</button>
         </form>
       </section>
       <section class="card">
-        <div class="card-header"><div><h3>Price preview</h3><p>Calculated by the backend, not the browser</p></div></div>
-        <div id="preview-panel">${previewIsCurrent ? previewMarkup(state.checkoutPreview) : '<div class="card-pad"><p class="help">Click Preview to calculate the current cart and voucher before placing the order.</p></div>'}</div>
+        <div class="card-header"><div><h3>Price preview</h3><p>Automatically calculated by the backend</p></div></div>
+        <div id="preview-panel">${loading('Calculating the current cart price...')}</div>
       </section>
     </div>`;
 
@@ -1068,6 +1090,8 @@ async function renderCheckout(container, force = false) {
     checkoutForm.elements.manualWard,
     checkoutForm.elements.manualStreet
   ];
+  let previewTimer = null;
+  let previewSequence = 0;
 
   function setCheckoutAddressMode(mode) {
     const useManual = mode === 'manual';
@@ -1081,12 +1105,27 @@ async function renderCheckout(container, force = false) {
     });
   }
 
-  function invalidatePreview() {
-    state.checkoutVoucher = voucherInput.value.trim();
+  async function refreshAutomaticPreview() {
+    const requestedVoucher = voucherInput.value.trim();
+    const requestSequence = ++previewSequence;
+    state.checkoutVoucher = requestedVoucher;
     state.checkoutPreview = null;
     state.checkoutPreviewVoucher = null;
-    previewPanel.innerHTML = '<div class="card-pad"><p class="help">Voucher changed. Click Preview again before placing the order.</p></div>';
     placeOrderButton.disabled = true;
+    previewPanel.innerHTML = loading(requestedVoucher ? `Checking voucher ${requestedVoucher}...` : 'Calculating the current cart price...');
+
+    try {
+      const preview = await api.previewOrder(requestedVoucher);
+      if (requestSequence !== previewSequence) return;
+      state.checkoutPreview = preview;
+      state.checkoutPreviewVoucher = requestedVoucher;
+      previewPanel.innerHTML = previewMarkup(preview);
+      placeOrderButton.disabled = false;
+    } catch (error) {
+      if (requestSequence !== previewSequence || error.authExpired) return;
+      previewPanel.innerHTML = `<div class="card-pad">${empty('Price preview unavailable', error.message)}</div>`;
+      placeOrderButton.disabled = true;
+    }
   }
 
   setCheckoutAddressMode(initialAddressMode);
@@ -1100,27 +1139,15 @@ async function renderCheckout(container, force = false) {
       document.querySelector('#payment-method-help').innerHTML = paymentMethodHelp(event.target.dataset.methodName);
     });
   });
-  voucherInput.addEventListener('input', invalidatePreview);
-
-  document.querySelector('#preview-order').addEventListener('click', async (event) => {
-    const currentVoucher = voucherInput.value.trim();
-    state.checkoutVoucher = currentVoucher;
+  voucherInput.addEventListener('input', () => {
+    clearTimeout(previewTimer);
+    ++previewSequence;
+    state.checkoutVoucher = voucherInput.value.trim();
     state.checkoutPreview = null;
     state.checkoutPreviewVoucher = null;
     placeOrderButton.disabled = true;
-    setBusy(event.currentTarget, true, 'Loading...');
-    try {
-      state.checkoutPreview = await api.previewOrder(currentVoucher);
-      state.checkoutPreviewVoucher = currentVoucher;
-      previewPanel.innerHTML = previewMarkup(state.checkoutPreview);
-      placeOrderButton.disabled = false;
-      toast('Order preview calculated by backend.');
-    } catch (error) {
-      previewPanel.innerHTML = '<div class="card-pad"><p class="help">Preview failed. Correct the voucher or cart and try again.</p></div>';
-      toast(error.message, 'error', 'Preview failed');
-    } finally {
-      setBusy(event.currentTarget, false);
-    }
+    previewPanel.innerHTML = loading('Updating voucher price...');
+    previewTimer = setTimeout(refreshAutomaticPreview, 450);
   });
 
   checkoutForm.addEventListener('submit', async (event) => {
@@ -1129,14 +1156,17 @@ async function renderCheckout(container, force = false) {
     const data = new FormData(event.currentTarget);
     const currentVoucher = String(data.get('voucherCode') || '').trim();
     if (!state.checkoutPreview || state.checkoutPreviewVoucher !== currentVoucher) {
-      return toast('Preview the current voucher and price before placing the order.', 'error', 'Preview required');
+      await refreshAutomaticPreview();
+      if (!state.checkoutPreview || state.checkoutPreviewVoucher !== currentVoucher) {
+        return toast('Wait for a valid automatic price preview before placing the order.', 'error', 'Price not ready');
+      }
     }
 
     const addressMode = data.get('addressMode');
     const paymentMethodId = Number(data.get('paymentMethodId'));
     const paymentMethod = state.paymentMethods.find((method) => Number(method.paymentMethodId) === paymentMethodId);
-    if (!paymentMethod) return toast('Choose a valid payment method returned by the backend.', 'error');
-    const isQr = normalizeName(paymentMethod.methodName) === 'QR_CODE';
+    if (!paymentMethod) return toast('Choose a valid COD or QR payment method returned by the backend.', 'error');
+    const isQr = paymentMethod.methodName === 'QR_CODE';
     const methodLabel = isQr ? 'QR online payment' : 'cash on delivery';
     const addressLabel = addressMode === 'manual' ? 'the manually entered address' : 'the selected saved address';
     if (!confirm(`Create this order using ${addressLabel} and ${methodLabel}? Stock will be deducted by the backend and the cart will be cleared.`)) return;
@@ -1182,19 +1212,20 @@ async function renderCheckout(container, force = false) {
       state.checkoutPreviewVoucher = null;
       state.checkoutVoucher = '';
       state.view = 'orders';
+      renderShell();
       if (isQr) {
         toast(`Order ${order.orderCode} created. Scan the QR and upload the receipt.`);
-        renderShell();
         setTimeout(() => openPaymentQrModal(order.orderId), 0);
       } else {
-        toast(`Order ${order.orderCode} is PENDING. Pay when the courier delivers it.`);
-        renderShell();
+        setTimeout(() => openCodOrderSuccessModal(order), 0);
       }
     } catch (error) {
       toast(error.message, 'error', 'Checkout failed');
       setBusy(event.submitter, false);
     }
   });
+
+  await refreshAutomaticPreview();
 }
 
 function previewMarkup(preview) {
@@ -1207,6 +1238,25 @@ function previewMarkup(preview) {
       <div style="display:flex;justify-content:space-between;font-size:18px;padding-top:12px;border-top:1px solid var(--line)"><span>Total</span><strong>${money(preview.total)}</strong></div>
     </div>
   </div>`;
+}
+
+function openCodOrderSuccessModal(order) {
+  showModal({
+    title: 'Order placed successfully',
+    body: `<div class="order-success" data-testid="cod-order-success">
+      <div class="order-success-icon">✓</div>
+      <h3>COD order success</h3>
+      <p>Your order <strong>${escapeHtml(order.orderCode)}</strong> was created successfully.</p>
+      <div class="order-meta">
+        <div><span>Order status</span><strong>${escapeHtml(order.status || 'PENDING')}</strong></div>
+        <div><span>Payment</span><strong>Cash on delivery</strong></div>
+        <div><span>Total</span><strong>${money(order.total)}</strong></div>
+      </div>
+      <p class="help">Pay the courier when the order is delivered. Stock and voucher usage were recorded by the backend.</p>
+    </div>`,
+    footer: '<button class="btn btn-primary" id="view-cod-order" data-testid="view-cod-order">View My Orders</button>'
+  });
+  document.querySelector('#view-cod-order')?.addEventListener('click', closeModal);
 }
 
 function openPaymentQrModal(orderId) {
@@ -1293,7 +1343,7 @@ async function renderOrders(container, force = false) {
 }
 
 function orderCard(order) {
-  const method = normalizeName(order.paymentMethod);
+  const method = canonicalPaymentMethodName(order.paymentMethod);
   const paymentStatus = normalizeName(order.paymentStatus);
   const isQr = method === 'QR_CODE';
   const canUpload = isQr && ['AWAITING_PAYMENT', 'FAILED'].includes(paymentStatus);
@@ -1301,13 +1351,15 @@ function orderCard(order) {
   const receiptUrl = safeExternalUrl(order.receiptUrl);
   let paymentMessage = '';
   if (paymentStatus === 'PAID') {
-    paymentMessage = '<div class="payment-result success"><strong>✓ Payment successful</strong><span>The online payment has been verified.</span></div>';
+    paymentMessage = isQr
+      ? '<div class="payment-result success"><strong>✓ Payment successful</strong><span>The online payment has been verified.</span></div>'
+      : '<div class="payment-result success"><strong>✓ COD payment completed</strong><span>The order was delivered and paid successfully.</span></div>';
   } else if (isQr && paymentStatus === 'PENDING_VERIFICATION') {
     paymentMessage = '<div class="payment-result pending"><strong>Receipt submitted</strong><span>Waiting for Admin verification. This page checks automatically every 5 seconds.</span></div>';
   } else if (isQr) {
     paymentMessage = '<div class="payment-result info"><strong>QR payment required</strong><span>Scan the QR and upload a receipt to continue.</span></div>';
   } else {
-    paymentMessage = '<div class="payment-result info"><strong>Cash on delivery</strong><span>Pay when receiving the order. The order remains PENDING.</span></div>';
+    paymentMessage = '<div class="payment-result info"><strong>Cash on delivery</strong><span>Order created successfully. Pay the courier when the order is delivered.</span></div>';
   }
   return `<article class="card order-card" data-testid="order-${order.orderId}">
     <div class="order-head"><div><h3>${escapeHtml(order.orderCode)}</h3><p>${dateTime(order.createdAt)}</p></div><div class="status-pair">${statusBadge(order.status, 'Order')}${statusBadge(order.paymentStatus, 'Payment')}</div></div>
@@ -1385,20 +1437,49 @@ async function renderAdminOrders(container, force = false) {
 
   container.innerHTML = `
     <section class="card">
-      <div class="card-header"><div><h3>All system orders</h3><p>Order status IDs and payment methods are loaded from the backend. Review QR receipts before marking payments PAID or FAILED.</p></div></div>
+      <div class="card-header"><div><h3>All system orders</h3><p>Only backend-approved status transitions are selectable. QR payments can be verified only while awaiting Admin verification.</p></div></div>
       ${state.adminOrders.length ? `<div class="table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Order status</th><th>Payment</th><th>Total</th><th>Actions</th></tr></thead><tbody>
         ${state.adminOrders.map((order) => {
-          const isQr = normalizeName(order.paymentMethod) === 'QR_CODE';
+          const isQr = canonicalPaymentMethodName(order.paymentMethod) === 'QR_CODE';
           const receiptUrl = safeExternalUrl(order.receiptUrl);
           const currentStatus = normalizeName(order.status);
           const currentPaymentStatus = normalizeName(order.paymentStatus);
+          const allowedNextStatuses = new Set((Array.isArray(order.allowedNextStatuses) ? order.allowedNextStatuses : []).map(normalizeName));
+          const visibleStatuses = state.orderStatuses.filter((status) => {
+            const statusName = normalizeName(status.statusName);
+            return statusName === currentStatus || allowedNextStatuses.has(statusName);
+          });
+          const canChangeStatus = visibleStatuses.some((status) => normalizeName(status.statusName) !== currentStatus);
+          const canVerifyPayment = isQr
+            && currentStatus === 'PENDING'
+            && currentPaymentStatus === 'PENDING_VERIFICATION'
+            && Boolean(receiptUrl);
           return `<tr data-testid="admin-order-${order.orderId}">
             <td><strong>${escapeHtml(order.orderCode)}</strong><div class="help">#${order.orderId} · ${dateTime(order.createdAt)}</div><div class="help">Voucher: ${escapeHtml(order.voucherCode || 'None')}</div></td>
             <td>${escapeHtml(order.receiverName)}<div class="help">${escapeHtml(order.receiverPhone)}</div></td>
-            <td>${statusBadge(order.status, 'Current')}<select class="select" style="margin-top:7px;min-width:170px" id="status-${order.orderId}" data-testid="order-status-${order.orderId}">${state.orderStatuses.map((status) => `<option value="${status.statusId}" ${normalizeName(status.statusName) === currentStatus ? 'selected' : ''}>${escapeHtml(status.statusName)}</option>`).join('')}</select></td>
-            <td>${statusBadge(order.paymentStatus, 'Current')}<div class="help">${escapeHtml(order.paymentMethod)}</div>${isQr ? `<select class="select" style="margin-top:7px;min-width:180px" id="payment-${order.orderId}" data-testid="payment-status-${order.orderId}"><option value="" ${['PAID', 'FAILED', 'PENDING_VERIFICATION'].includes(currentPaymentStatus) ? '' : 'selected'}>Choose verification result</option><option value="PAID" ${currentPaymentStatus === 'PAID' ? 'selected' : ''}>PAID</option><option value="FAILED" ${currentPaymentStatus === 'FAILED' ? 'selected' : ''}>FAILED</option><option value="PENDING_VERIFICATION" ${currentPaymentStatus === 'PENDING_VERIFICATION' ? 'selected' : ''}>PENDING_VERIFICATION</option></select><div class="help">${receiptUrl ? 'Receipt uploaded and ready to review.' : 'No receipt uploaded.'}</div>` : '<div class="help">Pay on delivery; no QR verification.</div>'}</td>
+            <td>
+              ${statusBadge(order.status, 'Current')}
+              <select class="select" style="margin-top:7px;min-width:180px" id="status-${order.orderId}" data-testid="order-status-${order.orderId}" ${canChangeStatus ? '' : 'disabled'}>
+                ${visibleStatuses.map((status) => `<option value="${status.statusId}" ${normalizeName(status.statusName) === currentStatus ? 'selected' : ''}>${escapeHtml(status.statusName)}</option>`).join('')}
+              </select>
+              <div class="help">${canChangeStatus ? `Allowed next: ${escapeHtml([...allowedNextStatuses].join(', '))}` : 'Terminal status: no further transition is allowed.'}</div>
+            </td>
+            <td>
+              ${statusBadge(order.paymentStatus, 'Current')}
+              <div class="help">${escapeHtml(canonicalPaymentMethodName(order.paymentMethod))}</div>
+              ${isQr ? `<select class="select" style="margin-top:7px;min-width:180px" id="payment-${order.orderId}" data-testid="payment-status-${order.orderId}" ${canVerifyPayment ? '' : 'disabled'}>
+                <option value="">Choose verification result</option>
+                <option value="PAID">PAID</option>
+                <option value="FAILED">FAILED</option>
+              </select>
+              <div class="help">${receiptUrl ? (canVerifyPayment ? 'Receipt uploaded and ready to review.' : `Verification unavailable while payment is ${escapeHtml(currentPaymentStatus)} or order is ${escapeHtml(currentStatus)}.`) : 'No receipt uploaded.'}</div>` : '<div class="help">Pay on delivery; payment becomes PAID when the order is DELIVERED.</div>'}
+            </td>
             <td>${money(order.total)}</td>
-            <td><div class="table-actions"><button class="btn btn-secondary btn-sm" data-update-status="${order.orderId}">Update status</button>${isQr && receiptUrl ? `<button class="btn btn-secondary btn-sm" data-admin-view-receipt="${order.orderId}" data-testid="admin-view-receipt-${order.orderId}">View Receipt</button>` : ''}${isQr ? `<button class="btn btn-success btn-sm" data-update-payment="${order.orderId}" ${receiptUrl ? '' : 'disabled'}>Verify payment</button>` : ''}</div></td>
+            <td><div class="table-actions">
+              <button class="btn btn-secondary btn-sm" data-update-status="${order.orderId}" ${canChangeStatus ? '' : 'disabled'}>Update status</button>
+              ${isQr && receiptUrl ? `<button class="btn btn-secondary btn-sm" data-admin-view-receipt="${order.orderId}" data-testid="admin-view-receipt-${order.orderId}">View Receipt</button>` : ''}
+              ${isQr ? `<button class="btn btn-success btn-sm" data-update-payment="${order.orderId}" ${canVerifyPayment ? '' : 'disabled'}>Verify payment</button>` : ''}
+            </div></td>
           </tr>`;
         }).join('')}
       </tbody></table></div>` : empty('No system orders', 'Create an order using a customer account.')}
@@ -1411,9 +1492,14 @@ async function renderAdminOrders(container, force = false) {
 
   container.querySelectorAll('[data-update-status]').forEach((button) => button.addEventListener('click', async () => {
     const orderId = Number(button.dataset.updateStatus);
+    const order = state.adminOrders.find((item) => Number(item.orderId) === orderId);
     const statusId = Number(document.querySelector(`#status-${orderId}`).value);
     const selectedStatus = state.orderStatuses.find((status) => Number(status.statusId) === statusId);
     if (!selectedStatus) return toast('Choose a valid order status returned by the backend.', 'error');
+    if (normalizeName(selectedStatus.statusName) === normalizeName(order?.status)) {
+      return toast('Choose one of the allowed next statuses before updating.', 'error');
+    }
+    if (!confirm(`Change ${order?.orderCode || `order #${orderId}`} from ${order?.status} to ${selectedStatus.statusName}?`)) return;
     setBusy(button, true, 'Updating...');
     try {
       await api.updateOrderStatus(orderId, statusId);
@@ -1425,16 +1511,21 @@ async function renderAdminOrders(container, force = false) {
       setBusy(button, false);
     }
   }));
+
   container.querySelectorAll('[data-update-payment]').forEach((button) => button.addEventListener('click', async () => {
     const orderId = Number(button.dataset.updatePayment);
     const order = state.adminOrders.find((item) => Number(item.orderId) === orderId);
     if (!safeExternalUrl(order?.receiptUrl)) return toast('Reviewable receipt image is required before payment verification.', 'error');
+    if (normalizeName(order?.status) !== 'PENDING' || normalizeName(order?.paymentStatus) !== 'PENDING_VERIFICATION') {
+      return toast('Payment can only be verified while the order is PENDING and payment is PENDING_VERIFICATION.', 'error');
+    }
     const paymentStatus = document.querySelector(`#payment-${orderId}`).value;
-    if (!paymentStatus) return toast('Choose PAID, FAILED, or PENDING_VERIFICATION.', 'error');
+    if (!['PAID', 'FAILED'].includes(paymentStatus)) return toast('Choose PAID or FAILED.', 'error');
+    if (!confirm(`Mark payment for ${order?.orderCode || `order #${orderId}`} as ${paymentStatus}?`)) return;
     setBusy(button, true, 'Updating...');
     try {
       await api.verifyPayment(orderId, paymentStatus);
-      toast(paymentStatus === 'PAID' ? 'Payment verified successfully.' : 'Payment status updated.');
+      toast(paymentStatus === 'PAID' ? 'Payment verified successfully.' : 'Payment marked as failed.');
       state.adminOrders = [];
       renderCurrentView();
     } catch (error) {
