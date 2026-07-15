@@ -161,3 +161,10 @@ SWT301_FRONTEND/
 ├── package.json             npm scripts and dependencies
 └── vite.config.js           Vite proxy and build configuration
 ```
+
+## npm registry troubleshooting
+
+This repository is configured to use the public npm registry through the project-level `.npmrc` file.
+If a previous failed install left locked files on Windows, close Node/Vite terminals, remove `node_modules`, clear npm's proxy settings if necessary, and run `npm ci` again.
+
+Vite 7 requires Node.js 20.19 or newer.

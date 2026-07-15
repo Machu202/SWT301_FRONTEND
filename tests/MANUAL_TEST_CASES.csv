@@ -1,0 +1,40 @@
+Test Case ID,Feature,Precondition,Test Data,Steps,Expected Result,Type
+TC-AUTH-001,Login,Valid CUSTOMER exists,"customer / Customer@123","Open login; enter credentials; submit",JWT is stored and CUSTOMER dashboard appears,Normal
+TC-AUTH-002,Login,Valid user exists,"Correct username / wrong password","Submit login",Error is shown and dashboard does not open,Abnormal
+TC-AUTH-003,Login,None,"Blank username and password","Submit login",Browser required validation blocks request,Boundary
+TC-AUTH-004,Register,Username does not exist,"username length 3; password length 6","Complete register form; submit",CUSTOMER account is created,Boundary
+TC-AUTH-005,Register,None,"username length 2","Submit register",Minimum-length validation blocks or backend returns validation error,Boundary
+TC-AUTH-006,Authorization,Logged in as CUSTOMER,None,"Run TC-SEC-01 in Test Lab",Admin endpoint returns HTTP 401 or 403,Security
+TC-AUTH-007,Authorization,Logged in as ADMIN,None,"Run TC-SEC-02 in Test Lab",Customer cart endpoint returns HTTP 401 or 403,Security
+TC-PROD-001,Product Catalog,Backend contains products,None,"Open Products",All backend products are rendered,Normal
+TC-PROD-002,Product Search,Products loaded,"Existing product name fragment","Enter search term",Only matching products remain,Normal
+TC-PROD-003,Product Stock,Product stock is 0,Quantity 1,"View product",Add button is disabled,Boundary
+TC-CART-001,Add to Cart,CUSTOMER logged in; stock >= 1,Quantity 1,"Click Add to cart",Cart contains product with quantity 1,Normal
+TC-CART-002,Add to Cart,CUSTOMER logged in,Quantity 0,"Set quantity to 0; click Add",Frontend or backend rejects quantity,Boundary
+TC-CART-003,Add to Cart,Product stock is N,Quantity N+1,"Enter quantity above stock; add",Backend returns insufficient stock error,Boundary
+TC-CART-004,Update Cart,Product is in cart,Quantity 2,"Change quantity; click Update",Quantity is replaced with 2 and totals recalculate,Normal
+TC-CART-005,Remove Cart,Product is in cart,None,"Click Remove",Item is deleted and cart total updates,Normal
+TC-ADDR-001,Create Address,CUSTOMER logged in,"0912345678","Complete all fields; save",Address is created,Normal
+TC-ADDR-002,Phone Validation,CUSTOMER logged in,"0112345678","Complete address; save",Invalid VN phone is rejected,Abnormal
+TC-ADDR-003,Required Address Field,CUSTOMER logged in,Blank province,"Submit address",Request is blocked or validation error names province,Boundary
+TC-ADDR-004,Default Address,At least two addresses exist,isDefault=true,"Edit second address; set default",Previous default becomes false,State
+TC-VOUCH-001,Voucher,Cart subtotal >= 200000,FIXED50,"Preview order with voucher",Discount is 50000,Normal
+TC-VOUCH-002,Voucher,Cart subtotal >= 100000,PERCENT10,"Preview order with voucher",Discount is 10 percent of subtotal,Normal
+TC-VOUCH-003,Voucher,Cart has items,EXPIRED,"Preview order",Backend returns invalid voucher error,Abnormal
+TC-VOUCH-004,Voucher,Cart has items,EMPTYQTY,"Preview order",Backend returns invalid voucher error,Abnormal
+TC-VOUCH-005,Voucher,Cart subtotal below minimum,FIXED50,"Preview order",Backend returns minimum-order validation error,Boundary
+TC-PRICE-001,Shipping Fee,Cart subtotal 499999,None,"Preview order",Shipping fee is 30000,Boundary
+TC-PRICE-002,Shipping Fee,Cart subtotal 500000,None,"Preview order",Shipping fee is 0,Boundary
+TC-ORDER-001,COD Checkout,Cart and address exist,COD payment method ID,"Preview; place order",Order is PENDING; payment is PENDING; cart clears,Normal
+TC-ORDER-002,QR Checkout,Cart and address exist,QR_CODE payment method ID,"Place order",Payment status is AWAITING_PAYMENT,Normal
+TC-ORDER-003,Empty Cart Checkout,Cart is empty,None,"Open Checkout",Place-order control is unavailable,Abnormal
+TC-QR-001,QR Upload,QR order is awaiting payment,Valid PNG under 5 MB,"Upload receipt",Payment becomes PENDING_VERIFICATION,Normal
+TC-QR-002,QR Upload,QR order exists,PDF file,"Attempt upload",Frontend/backend rejects file type,Abnormal
+TC-QR-003,QR Upload,QR order exists,Image over 5 MB,"Attempt upload",Frontend/backend rejects file size,Boundary
+TC-ADMIN-001,Create Product,ADMIN logged in,Valid category ID and fields,"Open Products; New product; save",Product is created and appears in catalog,Normal
+TC-ADMIN-002,Create Product,ADMIN logged in,Negative price,"Submit product",Validation rejects price,Boundary
+TC-ADMIN-003,Update Product,Product exists,New name and stock,"Edit product; save",Backend product is updated,Normal
+TC-ADMIN-004,Delete Product,Product exists,None,"Click Delete; confirm",Product is removed,Normal
+TC-ADMIN-005,Order Status,ADMIN logged in; order exists,PROCESSING status ID,"Choose status; update",Order response shows PROCESSING,State
+TC-ADMIN-006,Payment Verification,QR receipt pending,PAID,"Choose PAID; update",Payment status changes to PAID,State
+TC-DATA-001,Response Contract,Products exist,None,"Run TC-DATA-01",All ProductResponse fields required by UI exist,Contract

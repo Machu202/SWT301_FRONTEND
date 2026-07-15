@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a frontend, backend-integration, or software-testing defect
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: dropdown
+    id: role
+    attributes:
+      label: Role
+      options:
+        - Public/Unauthenticated
+        - CUSTOMER
+        - ADMIN
+    validations:
+      required: true
+
+  - type: input
+    id: page
+    attributes:
+      label: Page or workflow
+      placeholder: Login, cart, checkout, admin products, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start backend...
+        2. Log in as...
+        3. Click...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Include HTTP status, API-log output, browser console output, or screenshots.
