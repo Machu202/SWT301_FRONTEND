@@ -21,6 +21,7 @@ A backend-connected Vite frontend for the `SWT301_BACKEND-main` Spring Boot proj
 - Validate Vietnamese phone numbers
 - Check vouchers and preview backend-calculated totals
 - Checkout using backend-provided COD or QR payment IDs shown as radio buttons
+- Display the configured MB VietQR image during checkout, order review, receipt upload, and Admin QR review
 - View order history with voucher and uploaded receipt details
 - Upload JPG or PNG QR payment receipts up to 5 MB
 
@@ -30,7 +31,7 @@ A backend-connected Vite frontend for the `SWT301_BACKEND-main` Spring Boot proj
 - Delete products
 - View all system orders
 - Update order status using the live backend status list with the current value preselected
-- Preview Customer receipts before verifying payment as `PAID`, `FAILED`, or `PENDING_VERIFICATION`
+- View the configured payment QR and preview Customer receipts before verifying payment as `PAID`, `FAILED`, or `PENDING_VERIFICATION`
 
 ### Software-testing support
 
@@ -140,7 +141,8 @@ GitHub Pages hosts only static files. It cannot run the Spring Boot backend or u
 
 - The added reference-data endpoints expose supported payment methods and valid order statuses without relying on fixed database IDs.
 - Order responses now include the applied voucher code and uploaded receipt URL for Customer history and Admin verification.
-- Product creation and QR receipt upload still require valid Cloudinary configuration.
+- The payment QR image is bundled into both frontend and backend; QR receipt upload still requires valid Cloudinary configuration.
+- The configured payment destination is MB account `0846511618`, account name `CAO LE ANH KHOA`; Customers should use the order code as the transfer note.
 - GitHub Pages still requires Spring Security CORS to allow the deployed frontend origin.
 
 ## Project structure
@@ -148,7 +150,7 @@ GitHub Pages hosts only static files. It cannot run the Spring Boot backend or u
 ```text
 SWT301_FRONTEND/
 ├── .github/                 GitHub Actions and repository templates
-├── src/                     Frontend source
+├── src/                     Frontend source and configured VietQR asset
 ├── tests/                   Manual testing assets
 ├── .env.example             Environment variable template
 ├── API_MAPPING.md           Frontend/backend endpoint mapping

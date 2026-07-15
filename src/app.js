@@ -1,4 +1,5 @@
 import './styles.css';
+import paymentQrAsset from './assets/vietqr-payment.png';
 import {
   api,
   getSession,
@@ -34,10 +35,75 @@ const state = {
 
 const VALID_ROLES = new Set(['ADMIN', 'CUSTOMER']);
 const VIETNAM_PHONE_PATTERN = '^(?:0[35789][0-9]{8}|\+84[35789][0-9]{8})$';
+const PAYMENT_QR_BANK = 'MB';
+const PAYMENT_QR_ACCOUNT_NAME = 'CAO LE ANH KHOA';
+const PAYMENT_QR_ACCOUNT_NUMBER = '0846511618';
 const role = () => String(state.session?.role || '').replace(/^ROLE_/i, '').trim().toUpperCase();
 const hasValidRole = () => VALID_ROLES.has(role());
 const isAdmin = () => role() === 'ADMIN';
 const isCustomer = () => role() === 'CUSTOMER';
+
+
+const CATEGORY_LABELS_EN = new Map([
+  ['BÀN PHÍM CƠ', 'Mechanical Keyboards'],
+  ['BAN PHIM CO', 'Mechanical Keyboards'],
+  ['ĐIỆN THOẠI', 'Phones'],
+  ['DIEN THOAI', 'Phones'],
+  ['KEYCAP SETS & PHỤ KIỆN', 'Keycap Sets & Accessories'],
+  ['KEYCAP SETS & PHU KIEN', 'Keycap Sets & Accessories'],
+  ['PHỤ KIỆN', 'Accessories'],
+  ['PHU KIEN', 'Accessories'],
+  ['ĐIỆN TỬ', 'Electronics'],
+  ['DIEN TU', 'Electronics'],
+  ['NHÀ CỬA & ĐỜI SỐNG', 'Home & Living'],
+  ['NHA CUA & DOI SONG', 'Home & Living']
+]);
+
+const PRODUCT_LABELS_EN = new Map([
+  ['BỘ KEYCAP GENSHIN IMPACT THEME (FULL SET)', 'Genshin Impact Keycap Set (Full Set)'],
+  ['BO KEYCAP GENSHIN IMPACT THEME (FULL SET)', 'Genshin Impact Keycap Set (Full Set)']
+]);
+
+function stripVietnameseMarks(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D');
+}
+
+function englishCategoryName(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return 'Uncategorized';
+  return CATEGORY_LABELS_EN.get(normalizeName(raw))
+    || CATEGORY_LABELS_EN.get(normalizeName(stripVietnameseMarks(raw)))
+    || raw;
+}
+
+function englishProductName(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  return PRODUCT_LABELS_EN.get(normalizeName(raw))
+    || PRODUCT_LABELS_EN.get(normalizeName(stripVietnameseMarks(raw)))
+    || raw;
+}
+
+function productCategoryChoices() {
+  const choices = new Map();
+  state.products.forEach((product) => {
+    const categoryId = Number(product.categoryId);
+    if (!Number.isInteger(categoryId) || categoryId < 1) return;
+    if (!choices.has(categoryId)) {
+      choices.set(categoryId, {
+        categoryId,
+        rawName: String(product.categoryName || `Category ${categoryId}`)
+      });
+    }
+  });
+  return [...choices.values()].sort((a, b) =>
+    englishCategoryName(a.rawName).localeCompare(englishCategoryName(b.rawName), 'en')
+  );
+}
 
 function sanitizePhoneValue(value) {
   const cleaned = String(value || '').replace(/[^0-9+]/g, '');
@@ -605,9 +671,18 @@ async function loadProducts(force = false) {
 async function renderProducts(container, adminMode = false, force = false) {
   await loadProducts(force);
   if (!adminMode && (force || !state.cart)) state.cart = await api.cart();
-  const categories = [...new Set(state.products.map((product) => product.categoryName).filter(Boolean))];
+  const categories = [...new Set(state.products.map((product) => product.categoryName).filter(Boolean))]
+    .sort((a, b) => englishCategoryName(a).localeCompare(englishCategoryName(b), 'en'));
+  const normalizedSearch = state.search.toLowerCase();
   const filtered = state.products.filter((product) => {
-    const matchesSearch = `${product.productName} ${product.description || ''}`.toLowerCase().includes(state.search.toLowerCase());
+    const searchableText = [
+      product.productName,
+      englishProductName(product.productName),
+      product.description || '',
+      product.categoryName || '',
+      englishCategoryName(product.categoryName)
+    ].join(' ').toLowerCase();
+    const matchesSearch = searchableText.includes(normalizedSearch);
     const matchesCategory = state.category === 'ALL' || product.categoryName === state.category;
     return matchesSearch && matchesCategory;
   });
@@ -617,7 +692,7 @@ async function renderProducts(container, adminMode = false, force = false) {
       <div class="field"><input class="input" id="product-search" placeholder="Search name or description" value="${escapeHtml(state.search)}" data-testid="product-search" /></div>
       <select class="select" id="category-filter" style="max-width:220px" data-testid="category-filter">
         <option value="ALL">All categories</option>
-        ${categories.map((category) => `<option ${state.category === category ? 'selected' : ''}>${escapeHtml(category)}</option>`).join('')}
+        ${categories.map((category) => `<option value="${escapeHtml(category)}" ${state.category === category ? 'selected' : ''}>${escapeHtml(englishCategoryName(category))}</option>`).join('')}
       </select>
       ${adminMode ? '<button class="btn btn-primary" id="create-product" data-testid="create-product">+ New product</button>' : ''}
     </div>
@@ -653,8 +728,8 @@ function productCard(product, adminMode, available = Number(product.stock || 0),
     <article class="card product-card" data-testid="product-card-${product.productId}">
       <div class="product-image">${image}</div>
       <div class="product-body">
-        <div><span class="badge badge-blue">${escapeHtml(product.categoryName || `Category ${product.categoryId}`)}</span></div>
-        <h3>${escapeHtml(product.productName)}</h3>
+        <div><span class="badge badge-blue">${escapeHtml(englishCategoryName(product.categoryName || `Category ${product.categoryId}`))}</span></div>
+        <h3>${escapeHtml(englishProductName(product.productName))}</h3>
         <p>${escapeHtml(product.description || 'No description')}</p>
         <div class="product-meta"><span class="price">${money(product.price)}</span><span class="stock">${adminMode ? `Stock: ${escapeHtml(product.stock)}` : `Available: ${escapeHtml(available)}${inCart ? ` · In cart: ${escapeHtml(inCart)}` : ''}`}</span></div>
         ${adminMode ? `
@@ -721,19 +796,28 @@ function bindAdminProductActions(container) {
 
 function openProductModal(product = null) {
   const config = getConfig();
+  const categories = productCategoryChoices();
+  const selectedCategoryId = Number(product?.categoryId || config.categoryId);
+  const hasSelectedCategory = categories.some((category) => category.categoryId === selectedCategoryId);
+  const categoryControl = categories.length
+    ? `<select class="select" name="categoryId" required data-testid="product-category-id">
+        ${!hasSelectedCategory && selectedCategoryId > 0 ? `<option value="${selectedCategoryId}" selected>Category ID ${selectedCategoryId}</option>` : ''}
+        ${categories.map((category) => `<option value="${category.categoryId}" ${category.categoryId === selectedCategoryId ? 'selected' : ''}>${escapeHtml(englishCategoryName(category.rawName))}</option>`).join('')}
+      </select>`
+    : `<input class="input" type="number" min="1" name="categoryId" value="${escapeHtml(selectedCategoryId || 1)}" required data-testid="product-category-id" />`;
   showModal({
     title: product ? 'Edit product' : 'Create product',
     body: `
       <form id="product-form" data-testid="product-form">
         <div class="form-grid">
-          <div class="field"><label>Category ID</label><input class="input" type="number" min="1" name="categoryId" value="${escapeHtml(product?.categoryId || config.categoryId)}" required data-testid="product-category-id" /></div>
+          <div class="field"><label>Category</label>${categoryControl}</div>
           <div class="field"><label>Product name</label><input class="input" name="productName" value="${escapeHtml(product?.productName || '')}" required data-testid="product-name" /></div>
           <div class="field"><label>Price (VND)</label><input class="input" type="number" min="0" step="1" name="price" value="${escapeHtml(product?.price || 0)}" required data-testid="product-price" /></div>
           <div class="field"><label>Stock</label><input class="input" type="number" min="0" step="1" name="stock" value="${escapeHtml(product?.stock ?? 0)}" required data-testid="product-stock" /></div>
         </div>
         <div class="field" style="margin-top:14px"><label>Description</label><textarea class="textarea" name="description" data-testid="product-description">${escapeHtml(product?.description || '')}</textarea></div>
         <div class="field" style="margin-top:14px"><label>Image file (optional for update)</label><input class="input" type="file" name="imageFile" accept="image/png,image/jpeg" data-testid="product-image" /></div>
-        <p class="help">The backend sends this form as multipart/form-data and uploads images through Cloudinary.</p>
+        <p class="help">Category names are displayed in English while the original backend category IDs remain unchanged. The form is sent as multipart/form-data and images are uploaded through Cloudinary.</p>
       </form>`,
     footer: `<button class="btn btn-secondary" data-close-modal>Cancel</button><button class="btn btn-primary" id="save-product" data-testid="save-product">${product ? 'Save changes' : 'Create product'}</button>`
   });
@@ -970,7 +1054,10 @@ async function renderProfile(container, force = false) {
 
 function paymentMethodHelp(methodName) {
   return normalizeName(methodName) === 'QR_CODE'
-    ? '<div class="payment-help qr"><strong>QR online payment</strong><p>The order is created as PENDING with payment status AWAITING_PAYMENT. A QR code is generated immediately. After the receipt is uploaded and Admin verifies it, this page displays “Payment successful”.</p></div>'
+    ? `<div class="payment-help qr payment-help-with-qr">
+        <img src="${paymentQrAsset}" alt="MB VietQR payment" class="payment-help-qr" />
+        <div><strong>QR online payment</strong><p>Scan the configured MB VietQR for ${PAYMENT_QR_ACCOUNT_NAME} (${PAYMENT_QR_ACCOUNT_NUMBER}). Use the order code as the transfer note, then upload the payment receipt for Admin verification.</p></div>
+      </div>`
     : '<div class="payment-help cod"><strong>Cash on delivery (COD)</strong><p>Pay the courier when the order arrives. The order and payment remain PENDING until the delivery workflow is completed.</p></div>';
 }
 
@@ -1259,10 +1346,39 @@ function openCodOrderSuccessModal(order) {
   document.querySelector('#view-cod-order')?.addEventListener('click', closeModal);
 }
 
+function paymentQrDetailsMarkup({ orderCode = '', amount = null, paymentStatus = '', adminView = false } = {}) {
+  const transferNote = orderCode || 'Use the order code shown in the order details';
+  return `<div class="payment-qr payment-qr-configured">
+    <img src="${paymentQrAsset}" alt="MB VietQR payment for ${escapeHtml(transferNote)}" data-testid="payment-qr-image" />
+    <div>
+      ${paymentStatus ? `<span class="badge badge-blue">${escapeHtml(paymentStatus)}</span>` : '<span class="badge badge-blue">MB VIETQR</span>'}
+      <h3>${escapeHtml(orderCode || 'Configured payment QR')}</h3>
+      ${amount !== null && amount !== undefined ? `<p class="qr-amount">${money(amount)}</p>` : ''}
+      <div class="qr-bank-details">
+        <div><span>Bank</span><strong>${PAYMENT_QR_BANK}</strong></div>
+        <div><span>Account name</span><strong>${PAYMENT_QR_ACCOUNT_NAME}</strong></div>
+        <div><span>Account number</span><strong>${PAYMENT_QR_ACCOUNT_NUMBER}</strong></div>
+        <div><span>Transfer note</span><strong>${escapeHtml(transferNote)}</strong></div>
+      </div>
+      <p class="help">${adminView ? 'This is the same configured payment QR shown to Customers. Review the uploaded receipt separately before verifying payment.' : 'Scan this QR, enter the exact order total when required, and use the order code as the transfer note. Then upload the payment receipt.'}</p>
+    </div>
+  </div>`;
+}
+
+function openConfiguredPaymentQrModal({ orderCode = '', amount = null, paymentStatus = '', adminView = false, title = 'Configured QR payment' } = {}) {
+  showModal({
+    title,
+    large: true,
+    body: paymentQrDetailsMarkup({ orderCode, amount, paymentStatus, adminView }),
+    footer: '<button class="btn btn-secondary" data-close-modal>Close</button>'
+  });
+}
+
 function openPaymentQrModal(orderId) {
   showModal({
     title: `QR payment for order #${orderId}`,
-    body: `<div id="payment-qr-content">${loading('Generating QR code...')}</div>`,
+    large: true,
+    body: `<div id="payment-qr-content">${loading('Loading payment details...')}</div>`,
     footer: '<button class="btn btn-secondary" data-close-modal>Close</button><button class="btn btn-primary" id="payment-upload-receipt" data-testid="payment-upload-receipt">Upload payment receipt</button>'
   });
   document.querySelector('#payment-upload-receipt').addEventListener('click', () => {
@@ -1270,30 +1386,22 @@ function openPaymentQrModal(orderId) {
     openQrModal(orderId);
   });
 
-  Promise.all([api.paymentQrInfo(orderId), api.paymentQrCode(orderId)])
-    .then(([info, blob]) => {
+  api.paymentQrInfo(orderId)
+    .then((info) => {
       const modal = document.querySelector('#active-modal');
       if (!modal) return;
-      const objectUrl = URL.createObjectURL(blob);
-      modal.dataset.objectUrl = objectUrl;
-      document.querySelector('#payment-qr-content').innerHTML = `
-        <div class="payment-qr">
-          <img src="${objectUrl}" alt="Payment QR for ${escapeHtml(info.orderCode)}" data-testid="payment-qr-image" />
-          <div>
-            <span class="badge badge-blue">${escapeHtml(info.paymentStatus)}</span>
-            <h3>${escapeHtml(info.orderCode)}</h3>
-            <p class="qr-amount">${money(info.amount)}</p>
-            <p class="help">This testing QR contains the order code and amount. After paying, upload a receipt. Admin confirmation changes the payment status to PAID.</p>
-            <code class="qr-content">${escapeHtml(info.qrContent)}</code>
-          </div>
-        </div>`;
+      document.querySelector('#payment-qr-content').innerHTML = paymentQrDetailsMarkup({
+        orderCode: info.orderCode,
+        amount: info.amount,
+        paymentStatus: info.paymentStatus
+      });
       if (String(info.paymentStatus).toUpperCase() === 'PAID') {
         document.querySelector('#payment-upload-receipt')?.remove();
       }
     })
     .catch((error) => {
       const content = document.querySelector('#payment-qr-content');
-      if (content) content.innerHTML = `<div class="empty"><strong>Unable to generate QR</strong>${escapeHtml(error.message)}</div>`;
+      if (content) content.innerHTML = `<div class="empty"><strong>Unable to load QR payment</strong>${escapeHtml(error.message)}</div>`;
     });
 }
 
@@ -1394,8 +1502,15 @@ function openReceiptModal(receiptUrl, orderCode = 'order') {
 
 function openQrModal(orderId) {
   showModal({
-    title: `Upload receipt for order #${orderId}`,
-    body: `<form id="qr-form"><div class="field"><label>JPG or PNG, maximum 5 MB</label><input class="input" type="file" id="qr-file" accept="image/jpeg,image/png" required data-testid="qr-file" /></div><p class="help">A successful upload changes payment status to PENDING_VERIFICATION. Admin must confirm the receipt before the customer sees “Payment successful”.</p></form>`,
+    title: `Pay and upload receipt for order #${orderId}`,
+    large: true,
+    body: `<div class="qr-upload-layout">
+      <div class="qr-upload-payment">
+        <img src="${paymentQrAsset}" alt="MB VietQR payment" />
+        <div><strong>${PAYMENT_QR_BANK} · ${PAYMENT_QR_ACCOUNT_NUMBER}</strong><p class="help">Account name: ${PAYMENT_QR_ACCOUNT_NAME}. Use your order code as the transfer note.</p></div>
+      </div>
+      <form id="qr-form"><div class="field"><label>Payment receipt — JPG or PNG, maximum 5 MB</label><input class="input" type="file" id="qr-file" accept="image/jpeg,image/png" required data-testid="qr-file" /></div><p class="help">A successful upload changes payment status to PENDING_VERIFICATION. Admin must confirm the receipt before the customer sees “Payment successful”.</p></form>
+    </div>`,
     footer: '<button class="btn btn-secondary" data-close-modal>Cancel</button><button class="btn btn-primary" id="upload-qr-submit" data-testid="upload-qr-submit">Upload receipt</button>'
   });
   document.querySelector('#upload-qr-submit').addEventListener('click', async (event) => {
@@ -1450,7 +1565,9 @@ async function renderAdminOrders(container, force = false) {
             return statusName === currentStatus || allowedNextStatuses.has(statusName);
           });
           const canChangeStatus = visibleStatuses.some((status) => normalizeName(status.statusName) !== currentStatus);
-          const canVerifyPayment = isQr
+          const canChooseVerification = isQr
+            && !['PAID', 'FAILED'].includes(currentPaymentStatus);
+          const canVerifyPayment = canChooseVerification
             && currentStatus === 'PENDING'
             && currentPaymentStatus === 'PENDING_VERIFICATION'
             && Boolean(receiptUrl);
@@ -1467,16 +1584,17 @@ async function renderAdminOrders(container, force = false) {
             <td>
               ${statusBadge(order.paymentStatus, 'Current')}
               <div class="help">${escapeHtml(canonicalPaymentMethodName(order.paymentMethod))}</div>
-              ${isQr ? `<select class="select" style="margin-top:7px;min-width:180px" id="payment-${order.orderId}" data-testid="payment-status-${order.orderId}" ${canVerifyPayment ? '' : 'disabled'}>
+              ${isQr ? `<select class="select" style="margin-top:7px;min-width:180px" id="payment-${order.orderId}" data-testid="payment-status-${order.orderId}" ${canChooseVerification ? '' : 'disabled'}>
                 <option value="">Choose verification result</option>
                 <option value="PAID">PAID</option>
                 <option value="FAILED">FAILED</option>
               </select>
-              <div class="help">${receiptUrl ? (canVerifyPayment ? 'Receipt uploaded and ready to review.' : `Verification unavailable while payment is ${escapeHtml(currentPaymentStatus)} or order is ${escapeHtml(currentStatus)}.`) : 'No receipt uploaded.'}</div>` : '<div class="help">Pay on delivery; payment becomes PAID when the order is DELIVERED.</div>'}
+              <div class="help">${receiptUrl ? (canVerifyPayment ? 'Receipt uploaded and ready to review.' : `The dropdown is available, but Verify payment remains locked until the order is PENDING and payment is PENDING_VERIFICATION. Current: ${escapeHtml(currentStatus)} / ${escapeHtml(currentPaymentStatus)}.`) : 'The dropdown can be opened, but a receipt must be uploaded before verification is allowed.'}</div>` : '<div class="help">Pay on delivery; payment becomes PAID when the order is DELIVERED.</div>'}
             </td>
             <td>${money(order.total)}</td>
             <td><div class="table-actions">
               <button class="btn btn-secondary btn-sm" data-update-status="${order.orderId}" ${canChangeStatus ? '' : 'disabled'}>Update status</button>
+              ${isQr ? `<button class="btn btn-secondary btn-sm" data-admin-view-payment-qr="${order.orderId}" data-testid="admin-view-payment-qr-${order.orderId}">View Payment QR</button>` : ''}
               ${isQr && receiptUrl ? `<button class="btn btn-secondary btn-sm" data-admin-view-receipt="${order.orderId}" data-testid="admin-view-receipt-${order.orderId}">View Receipt</button>` : ''}
               ${isQr ? `<button class="btn btn-success btn-sm" data-update-payment="${order.orderId}" ${canVerifyPayment ? '' : 'disabled'}>Verify payment</button>` : ''}
             </div></td>
@@ -1484,6 +1602,17 @@ async function renderAdminOrders(container, force = false) {
         }).join('')}
       </tbody></table></div>` : empty('No system orders', 'Create an order using a customer account.')}
     </section>`;
+
+  container.querySelectorAll('[data-admin-view-payment-qr]').forEach((button) => button.addEventListener('click', () => {
+    const order = state.adminOrders.find((item) => Number(item.orderId) === Number(button.dataset.adminViewPaymentQr));
+    openConfiguredPaymentQrModal({
+      orderCode: order?.orderCode,
+      amount: order?.total,
+      paymentStatus: order?.paymentStatus,
+      adminView: true,
+      title: `Payment QR — ${order?.orderCode || `order #${button.dataset.adminViewPaymentQr}`}`
+    });
+  }));
 
   container.querySelectorAll('[data-admin-view-receipt]').forEach((button) => button.addEventListener('click', () => {
     const order = state.adminOrders.find((item) => Number(item.orderId) === Number(button.dataset.adminViewReceipt));

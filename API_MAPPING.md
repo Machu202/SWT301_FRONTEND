@@ -25,7 +25,7 @@
 | Preview checkout | GET | `/api/orders/preview` | CUSTOMER |
 | Create order | POST | `/api/orders/checkout` | CUSTOMER |
 | Read QR payment information | GET | `/api/orders/{orderId}/payment/qr-info` | CUSTOMER |
-| Generate QR image | GET | `/api/orders/{orderId}/payment/qr-code` | CUSTOMER |
+| Read configured VietQR payment image | GET | `/api/orders/{orderId}/payment/qr-code` | CUSTOMER |
 | Upload QR receipt | POST multipart | `/api/orders/{orderId}/payment/qr` | CUSTOMER |
 | Customer order history | GET | `/api/orders` | CUSTOMER |
 | All system orders | GET | `/api/admin/orders` | ADMIN |
@@ -35,3 +35,6 @@
 All authenticated calls send `Authorization: Bearer <JWT>`.
 
 The frontend does not store payment-method IDs or order-status IDs as constants. It loads them from the two reference-data endpoints. The API base URL is fixed at build time by `VITE_API_BASE_URL` and cannot be changed by a Customer through Settings.
+
+
+The QR image endpoint preserves Customer ownership and QR-payment validation before returning the bundled MB VietQR image. The frontend also bundles the same image so Checkout, receipt upload, My Orders, and Admin Orders use one consistent payment QR.
