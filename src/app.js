@@ -9,6 +9,7 @@ import {
   cancelRequestScope,
   isApiLogEnabled
 } from './api.js';
+import { VIETNAM_PHONE_PATTERN, sanitizePhoneValue, isValidVietnamPhone } from './validation.js';
 
 const app = document.querySelector('#app');
 
@@ -45,7 +46,7 @@ const state = {
 };
 
 const VALID_ROLES = new Set(['ADMIN', 'CUSTOMER']);
-const VIETNAM_PHONE_PATTERN = '^(?:0[35789][0-9]{8}|\+84[35789][0-9]{8})$';
+const PRODUCTS_PAGE_SIZE = 12;
 const role = () => String(state.session?.role || '').replace(/^ROLE_/i, '').trim().toUpperCase();
 const hasValidRole = () => VALID_ROLES.has(role());
 const isAdmin = () => role() === 'ADMIN';
@@ -103,25 +104,22 @@ function productCategoryChoices() {
     .sort((a, b) => englishCategoryName(a.rawName).localeCompare(englishCategoryName(b.rawName), 'en'));
 }
 
-function sanitizePhoneValue(value) {
-  const cleaned = String(value || '').replace(/[^0-9+]/g, '');
-  const withSinglePlus = cleaned.startsWith('+')
-    ? `+${cleaned.slice(1).replaceAll('+', '')}`
-    : cleaned.replaceAll('+', '');
-  return withSinglePlus.slice(0, withSinglePlus.startsWith('+') ? 12 : 10);
-}
-
-function isValidVietnamPhone(value) {
-  return new RegExp(VIETNAM_PHONE_PATTERN).test(String(value || '').trim());
-}
-
 function bindPhoneOnlyInput(input) {
   if (!input) return;
+  const validate = () => {
+    const value = input.value.trim();
+    input.setCustomValidity(value && !isValidVietnamPhone(value)
+      ? 'Use exactly 10 digits beginning with 03, 05, 07, 08 or 09, or use +84 instead of the leading 0.'
+      : '');
+  };
   input.addEventListener('input', () => {
     const cursorAtEnd = input.selectionStart === input.value.length;
     input.value = sanitizePhoneValue(input.value);
+    validate();
     if (cursorAtEnd) input.setSelectionRange(input.value.length, input.value.length);
   });
+  input.addEventListener('blur', validate);
+  validate();
 }
 
 function stopPaymentPolling() {
@@ -785,13 +783,13 @@ async function loadProducts(force = false, adminMode = false) {
   const page = Number(state.productPage.page || 0);
   const params = {
     page,
-    size: Number(state.productPage.size || 12),
+    size: PRODUCTS_PAGE_SIZE,
     search: state.debouncedSearch,
     categoryId: state.category === 'ALL' ? null : Number(state.category)
   };
   const response = adminMode ? await api.adminProductsPage(params) : await api.productsPage(params);
   state.products = response.content || [];
-  state.productPage = response;
+  state.productPage = { ...response, size: PRODUCTS_PAGE_SIZE };
   return state.products;
 }
 
@@ -1091,6 +1089,29 @@ async function renderAddresses(container, force = false) {
   container.querySelectorAll('[data-edit-address]').forEach((button) => button.addEventListener('click', () => {
     openAddressModal(state.addresses.find((a) => a.addressId === Number(button.dataset.editAddress)));
   }));
+  container.querySelectorAll('[data-set-default-address]').forEach((button) => button.addEventListener('click', async () => {
+    const addressId = Number(button.dataset.setDefaultAddress);
+    const address = state.addresses.find((item) => Number(item.addressId) === addressId);
+    if (!address) return toast('Address no longer exists. Refresh and try again.', 'error');
+    setBusy(button, true, 'Setting default...');
+    try {
+      await api.updateAddress(addressId, {
+        receiverName: address.receiverName,
+        receiverPhone: address.receiverPhone,
+        province: address.province,
+        district: address.district,
+        ward: address.ward,
+        street: address.street,
+        isDefault: true
+      });
+      state.addresses = await api.addresses();
+      toast('Default address updated.');
+      renderAddresses(container, false);
+    } catch (error) {
+      if (!error.cancelled) toast(error.message, 'error', 'Update failed');
+      setBusy(button, false);
+    }
+  }));
   container.querySelectorAll('[data-delete-address]').forEach((button) => button.addEventListener('click', async () => {
     const addressId = Number(button.dataset.deleteAddress);
     const address = state.addresses.find((item) => item.addressId === addressId);
@@ -1102,7 +1123,7 @@ async function renderAddresses(container, force = false) {
       toast(response.message || 'Address deleted.');
       renderAddresses(container, false);
     } catch (error) {
-      toast(error.message, 'error', 'Delete failed');
+      if (!error.cancelled) toast(error.message, 'error', 'Delete failed');
       setBusy(button, false);
     }
   }));
@@ -1114,6 +1135,7 @@ function addressCard(address) {
     <p class="help">${escapeHtml(address.receiverPhone)}</p>
     <p style="font-size:13px;line-height:1.6">${escapeHtml(address.street)}, ${escapeHtml(address.ward)}, ${escapeHtml(address.district)}, ${escapeHtml(address.province)}</p>
     <div class="table-actions">
+      ${address.isDefault ? '' : `<button class="btn btn-secondary btn-sm" data-set-default-address="${address.addressId}" data-testid="set-default-address-${address.addressId}">Set default</button>`}
       <button class="btn btn-secondary btn-sm" data-edit-address="${address.addressId}" data-testid="edit-address-${address.addressId}">Edit address</button>
       <button class="btn btn-danger btn-sm" data-delete-address="${address.addressId}" data-testid="delete-address-${address.addressId}">Delete address</button>
     </div>
@@ -1121,6 +1143,7 @@ function addressCard(address) {
 }
 
 function openAddressModal(address = null) {
+  const mustBeDefault = (!address && state.addresses.length === 0) || Boolean(address?.isDefault && state.addresses.length === 1);
   showModal({
     title: address ? 'Edit address' : 'Create address',
     body: `
@@ -1133,7 +1156,8 @@ function openAddressModal(address = null) {
           <div class="field"><label>Ward</label><input class="input" name="ward" value="${escapeHtml(address?.ward || '')}" required data-testid="ward" /></div>
           <div class="field"><label>Street / House number</label><input class="input" name="street" value="${escapeHtml(address?.street || '')}" required data-testid="street" /></div>
         </div>
-        <label style="display:flex;align-items:center;gap:8px;margin-top:15px"><input type="checkbox" name="isDefault" ${address?.isDefault ? 'checked' : ''} /> Set as default address</label>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:15px"><input type="checkbox" name="isDefault" ${(address?.isDefault || mustBeDefault) ? 'checked' : ''} ${mustBeDefault ? 'disabled' : ''} /> Set as default address</label>
+        ${mustBeDefault ? '<p class="help">At least one saved address must remain the default address.</p>' : ''}
         <p class="help">Accepted: 0912345678 or +84912345678. Letters and extra digits are blocked.</p>
       </form>`,
     footer: `<button class="btn btn-secondary" data-close-modal>Cancel</button><button class="btn btn-primary" id="save-address" data-testid="save-address">Save address</button>`
@@ -1152,25 +1176,12 @@ function openAddressModal(address = null) {
       district: data.get('district').trim(),
       ward: data.get('ward').trim(),
       street: data.get('street').trim(),
-      isDefault: data.get('isDefault') === 'on'
+      isDefault: mustBeDefault || data.get('isDefault') === 'on'
     };
     setBusy(event.currentTarget, true, 'Saving...');
     try {
-      const saved = address ? await api.updateAddress(address.addressId, payload) : await api.createAddress(payload);
-      const safeAddress = {
-        addressId: saved.addressId,
-        receiverName: saved.receiverName,
-        receiverPhone: saved.receiverPhone,
-        province: saved.province,
-        district: saved.district,
-        ward: saved.ward,
-        street: saved.street,
-        isDefault: saved.isDefault
-      };
-      if (safeAddress.isDefault) state.addresses.forEach((item) => { item.isDefault = false; });
-      const index = state.addresses.findIndex((item) => item.addressId === safeAddress.addressId);
-      if (index >= 0) state.addresses[index] = safeAddress;
-      else state.addresses.push(safeAddress);
+      await (address ? api.updateAddress(address.addressId, payload) : api.createAddress(payload));
+      state.addresses = await api.addresses();
       toast(address ? 'Address updated.' : 'Address created.');
       closeModal();
       renderCurrentView();
@@ -1228,7 +1239,7 @@ async function renderProfile(container, force = false) {
 
 function paymentMethodHelp(methodName) {
   return normalizeName(methodName) === 'QR_CODE'
-    ? '<div class="payment-help qr"><strong>QR online payment</strong><p>After the order is created, the backend generates a unique VietQR using the exact order total and order code. Bank details are supplied by the backend, not hardcoded in this browser.</p></div>'
+    ? '<div class="payment-help qr"><strong>QR online payment</strong><p>After the order is created, the backend serves the exact MB Bank QR image configured for this project. Use the displayed order total and transfer note, then upload the receipt.</p></div>'
     : '<div class="payment-help cod"><strong>Cash on delivery (COD)</strong><p>Pay the courier when the order arrives. The order remains PENDING until the delivery workflow is completed.</p></div>';
 }
 
@@ -1394,7 +1405,7 @@ async function renderCheckout(container, force = false) {
       state.view = 'orders';
       renderShell();
       if (isQr) {
-        toast(`Order ${order.orderCode} created. Scan the order-specific QR and upload the receipt.`);
+        toast(`Order ${order.orderCode} created. Scan the configured MB Bank QR and upload the receipt.`);
         setTimeout(() => openPaymentQrModal(order.orderId), 0);
       } else setTimeout(() => openCodOrderSuccessModal(order), 0);
     } catch (error) {
@@ -1437,16 +1448,16 @@ function openCodOrderSuccessModal(order) {
 }
 
 function paymentQrDetailsMarkup(info, imageUrl, adminView = false) {
-  return `<div class="payment-qr"><img src="${escapeHtml(imageUrl)}" alt="Order-specific VietQR for ${escapeHtml(info.orderCode)}" data-testid="payment-qr-image" /><div>
+  return `<div class="payment-qr"><img src="${escapeHtml(imageUrl)}" alt="Configured MB Bank payment QR for ${escapeHtml(info.orderCode)}" data-testid="payment-qr-image" /><div>
     ${statusBadge(info.paymentStatus || 'AWAITING_PAYMENT', 'Payment')}
     <h3>${escapeHtml(info.orderCode)}</h3><p class="qr-amount">${money(info.amount)}</p>
-    <div class="qr-bank-details"><div><span>Bank</span><strong>${escapeHtml(info.bankName || info.bankId || 'Configured by backend')}</strong></div><div><span>Account name</span><strong>${escapeHtml(info.accountName || 'Configured by backend')}</strong></div><div><span>Account number</span><strong>${escapeHtml(info.accountNumber || 'Configured by backend')}</strong></div><div><span>Transfer note</span><strong>${escapeHtml(info.transferNote || info.orderCode)}</strong></div></div>
-    <p class="help">${adminView ? 'This QR was generated by the backend for this exact order amount and transfer note. Review the protected receipt separately before verification.' : 'Scan this order-specific QR. The amount and transfer note are already encoded by the backend, then upload your receipt.'}</p>
+    <div class="qr-bank-details"><div><span>Payment recipient</span><strong>Use the bank and account encoded in this exact QR image</strong></div><div><span>Transfer note</span><strong>${escapeHtml(info.transferNote || info.orderCode)}</strong></div></div>
+    <p class="help">${adminView ? "This is the project's exact configured MB Bank QR image. Compare the protected receipt with the displayed order amount and transfer note before verification." : 'Scan this exact MB Bank QR image, confirm the displayed order amount and transfer note, then upload your receipt.'}</p>
   </div></div>`;
 }
 
 async function openConfiguredPaymentQrModal({ orderId, adminView = false, title = 'Order payment QR' } = {}) {
-  showModal({ title, large: true, body: `<div id="payment-qr-content">${loading('Generating order-specific QR...')}</div>`, footer: '<button class="btn btn-secondary" data-close-modal>Close</button>' });
+  showModal({ title, large: true, body: `<div id="payment-qr-content">${loading('Loading configured MB Bank QR...')}</div>`, footer: '<button class="btn btn-secondary" data-close-modal>Close</button>' });
   try {
     const [info, blob] = await Promise.all([
       adminView ? api.adminPaymentQrInfo(orderId) : api.paymentQrInfo(orderId),
@@ -1464,7 +1475,7 @@ async function openConfiguredPaymentQrModal({ orderId, adminView = false, title 
 }
 
 async function openPaymentQrModal(orderId) {
-  showModal({ title: `QR payment for order #${orderId}`, large: true, body: `<div id="payment-qr-content">${loading('Generating order-specific QR...')}</div>`, footer: '<button class="btn btn-secondary" data-close-modal>Close</button><button class="btn btn-primary" id="payment-upload-receipt" data-testid="payment-upload-receipt">Upload payment receipt</button>' });
+  showModal({ title: `QR payment for order #${orderId}`, large: true, body: `<div id="payment-qr-content">${loading('Loading configured MB Bank QR...')}</div>`, footer: '<button class="btn btn-secondary" data-close-modal>Close</button><button class="btn btn-primary" id="payment-upload-receipt" data-testid="payment-upload-receipt">Upload payment receipt</button>' });
   document.querySelector('#payment-upload-receipt')?.addEventListener('click', () => { closeModal(); openQrModal(orderId); });
   try {
     const [info, blob] = await Promise.all([api.paymentQrInfo(orderId), api.paymentQrCode(orderId)]);
@@ -1530,7 +1541,7 @@ function orderCard(order) {
     ? `<div class="payment-result success"><strong>✓ ${isQr ? 'Payment successful' : 'COD payment completed'}</strong><span>${isQr ? 'The online payment has been verified.' : 'The order was delivered and paid successfully.'}</span></div>`
     : isQr && paymentStatus === 'PENDING_VERIFICATION'
       ? '<div class="payment-result pending"><strong>Receipt submitted</strong><span>Waiting for Admin verification. Automatic refresh stops after repeated connection failures.</span></div>'
-      : isQr ? '<div class="payment-result info"><strong>QR payment required</strong><span>Open the order-specific QR and upload a receipt.</span></div>'
+      : isQr ? '<div class="payment-result info"><strong>QR payment required</strong><span>Open the configured MB Bank QR and upload a receipt.</span></div>'
         : '<div class="payment-result info"><strong>Cash on delivery</strong><span>Pay the courier when the order is delivered.</span></div>';
   const items = Array.isArray(order.items) ? order.items : [];
   return `<article class="card order-card" data-testid="order-${order.orderId}">
