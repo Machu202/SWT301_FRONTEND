@@ -46,7 +46,7 @@ test('address CRUD and manual checkout address remain available', () => {
 
 test('QR views load authenticated backend image endpoints', () => {
   assert.match(api, /paymentQrCode:.*responseType:\s*'blob'/);
-  assert.match(app, /exact configured MB Bank QR image/);
+  assert.match(app, /scan the displayed MB Bank QR code/);
   assert.doesNotMatch(app, /img\.vietqr\.io/);
 });
 
@@ -70,6 +70,52 @@ test('product catalog remains visible when cart loading fails', () => {
 });
 
 test('checkout reports the exact failed dependency', () => {
-  assert.match(app, /Checkout cannot load required data/);
+  assert.match(app, /Checkout is temporarily unavailable/);
   assert.match(app, /Promise\.allSettled/);
+});
+
+test('receipt upload modal has preview, remove, drag-and-drop and guarded submit', () => {
+  assert.match(app, /receipt-dropzone/);
+  assert.match(app, /qr-file-preview-image/);
+  assert.match(app, /data-testid="qr-file-remove"/);
+  assert.match(app, /addEventListener\('drop'/);
+  assert.match(app, /submit\.disabled = true/);
+  assert.match(css, /\.receipt-upload-shell/);
+  assert.match(css, /\.receipt-file-preview/);
+});
+
+
+test('Settings and Test Lab are removed for every role', () => {
+  assert.doesNotMatch(app, /\['test-lab',\s*'⌁',\s*'Test Lab'\]/);
+  assert.doesNotMatch(app, /\['settings',\s*'⚙',\s*'Settings'\]/);
+  assert.doesNotMatch(app, /case 'test-lab'/);
+  assert.doesNotMatch(app, /case 'settings'/);
+  assert.match(app, /function ensureAllowedView\(\)/);
+});
+
+
+test('Profile removes the Account information panel and uses the redesigned single-card layout', () => {
+  assert.doesNotMatch(app, />Account information</);
+  assert.doesNotMatch(app, />Role validation</);
+  assert.doesNotMatch(app, />User ID</);
+  assert.match(app, /class="profile-page"/);
+  assert.match(app, /class="card profile-card"/);
+  assert.match(app, /class="profile-section"/);
+  assert.match(css, /\.profile-page/);
+  assert.match(css, /\.profile-actions/);
+});
+
+
+test('Customer and Admin screens use neutral business-facing language', () => {
+  assert.match(app, /Customer Portal/);
+  assert.match(app, /Admin Portal/);
+  assert.match(app, /Store overview/);
+  assert.match(app, /Welcome back/);
+  assert.doesNotMatch(app, /Backend-connected frontend/);
+  assert.doesNotMatch(app, /Functional Testing Client/);
+  assert.doesNotMatch(app, /TEST WORKSPACE/);
+  assert.doesNotMatch(app, /GET \/api\/reference\/categories/);
+  assert.doesNotMatch(app, /Cloudinary image/);
+  assert.doesNotMatch(api, /Cannot reach the backend/);
+  assert.doesNotMatch(api, /Request failed with HTTP/);
 });
