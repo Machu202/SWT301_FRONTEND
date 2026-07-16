@@ -61,3 +61,15 @@ test('checkout keeps COD and QR radio controls', () => {
   assert.match(app, /COD/);
   assert.match(app, /QR_CODE/);
 });
+
+
+test('product catalog remains visible when cart loading fails', () => {
+  assert.match(app, /Product browsing remains available/);
+  assert.match(app, /state\.cartLoadError/);
+  assert.match(app, /Cart unavailable/);
+});
+
+test('checkout reports the exact failed dependency', () => {
+  assert.match(app, /Checkout cannot load required data/);
+  assert.match(app, /Promise\.allSettled/);
+});

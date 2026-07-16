@@ -20,6 +20,7 @@ const state = {
   productPage: { page: 0, size: 12, totalElements: 0, totalPages: 0 },
   categories: [],
   cart: null,
+  cartLoadError: null,
   addresses: [],
   orders: [],
   ordersPage: { page: 0, size: 10, totalElements: 0, totalPages: 0 },
@@ -140,6 +141,7 @@ function resetAuthenticatedState() {
   state.productPage = { page: 0, size: 12, totalElements: 0, totalPages: 0 };
   state.categories = [];
   state.cart = null;
+  state.cartLoadError = null;
   state.addresses = [];
   state.orders = [];
   state.ordersPage = { page: 0, size: 10, totalElements: 0, totalPages: 0 };
@@ -779,7 +781,15 @@ function readinessList() {
 }
 
 async function loadProducts(force = false, adminMode = false) {
-  if (force || !state.categories.length) state.categories = await api.categories();
+  let categoryError = null;
+  if (force || !state.categories.length) {
+    try {
+      state.categories = await api.categories();
+    } catch (error) {
+      categoryError = error;
+      state.categories = state.categories || [];
+    }
+  }
   const page = Number(state.productPage.page || 0);
   const params = {
     page,
@@ -787,15 +797,57 @@ async function loadProducts(force = false, adminMode = false) {
     search: state.debouncedSearch,
     categoryId: state.category === 'ALL' ? null : Number(state.category)
   };
-  const response = adminMode ? await api.adminProductsPage(params) : await api.productsPage(params);
-  state.products = response.content || [];
+  let response;
+  try {
+    response = adminMode ? await api.adminProductsPage(params) : await api.productsPage(params);
+  } catch (error) {
+    if (adminMode) throw error;
+    // Compatibility fallback for backends that still expose only GET /api/products.
+    const allProducts = await api.products();
+    const search = state.debouncedSearch.toLowerCase();
+    const categoryId = params.categoryId;
+    const filtered = (Array.isArray(allProducts) ? allProducts : []).filter((product) => {
+      const matchesCategory = categoryId == null || Number(product.categoryId) === Number(categoryId);
+      const searchable = `${product.productName || ''} ${product.description || ''}`.toLowerCase();
+      return matchesCategory && (!search || searchable.includes(search));
+    });
+    const start = page * PRODUCTS_PAGE_SIZE;
+    response = {
+      content: filtered.slice(start, start + PRODUCTS_PAGE_SIZE),
+      page,
+      size: PRODUCTS_PAGE_SIZE,
+      totalElements: filtered.length,
+      totalPages: Math.ceil(filtered.length / PRODUCTS_PAGE_SIZE),
+      first: page === 0,
+      last: start + PRODUCTS_PAGE_SIZE >= filtered.length
+    };
+  }
+  state.products = Array.isArray(response.content) ? response.content : [];
   state.productPage = { ...response, size: PRODUCTS_PAGE_SIZE };
-  return state.products;
+  if (!state.categories.length && state.products.length) {
+    const unique = new Map();
+    state.products.forEach((product) => {
+      if (product.categoryId != null) unique.set(Number(product.categoryId), {
+        categoryId: Number(product.categoryId),
+        categoryName: product.categoryName || `Category ${product.categoryId}`
+      });
+    });
+    state.categories = [...unique.values()];
+  }
+  return { products: state.products, categoryError };
 }
 
 async function renderProducts(container, adminMode = false, force = false) {
-  await loadProducts(force, adminMode);
-  if (!adminMode && (force || !state.cart)) state.cart = await api.cart();
+  const { categoryError } = await loadProducts(force, adminMode);
+  if (!adminMode && (force || !state.cart)) {
+    try {
+      state.cart = await api.cart();
+      state.cartLoadError = null;
+    } catch (error) {
+      state.cartLoadError = error;
+      state.cart = { items: [], totalCartPrice: 0 };
+    }
+  }
   const categories = productCategoryChoices();
   container.innerHTML = `
     <div class="toolbar">
@@ -806,10 +858,12 @@ async function renderProducts(container, adminMode = false, force = false) {
       </select>
       ${adminMode ? '<button class="btn btn-primary" id="create-product" data-testid="create-product">+ New product</button>' : ''}
     </div>
+    ${categoryError ? `<div class="alert alert-warning"><strong>Categories could not be loaded.</strong><span>${escapeHtml(categoryError.message)}</span></div>` : ''}
+    ${state.cartLoadError && !adminMode ? `<div class="alert alert-error"><strong>Cart could not be loaded.</strong><span>${escapeHtml(state.cartLoadError.message)} Product browsing remains available, but Add to cart is disabled until Refresh succeeds.</span></div>` : ''}
     ${state.products.length ? `<div class="products">${state.products.map((product) => {
       const inCart = state.cart?.items?.find((item) => Number(item.productId) === Number(product.productId))?.quantity || 0;
       const available = Math.max(0, Number(product.stock || 0) - inCart);
-      return productCard(product, adminMode, available, inCart);
+      return productCard(product, adminMode, available, inCart, Boolean(state.cartLoadError));
     }).join('')}</div>` : `<div class="card">${empty('No products found', 'Adjust the search or category filter.')}</div>`}
     ${paginationMarkup(state.productPage, 'products')}`;
 
@@ -835,7 +889,7 @@ async function renderProducts(container, adminMode = false, force = false) {
   else bindCustomerProductActions(container);
 }
 
-function productCard(product, adminMode, available = Number(product.stock || 0), inCart = 0) {
+function productCard(product, adminMode, available = Number(product.stock || 0), inCart = 0, cartUnavailable = false) {
   const active = normalizeName(product.status || 'ACTIVE') === 'ACTIVE';
   const image = product.image
     ? `<img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.productName)}" onerror="this.parentElement.innerHTML='No image'" />`
@@ -854,8 +908,8 @@ function productCard(product, adminMode, available = Number(product.stock || 0),
             <button class="btn btn-danger btn-sm" data-delete-product="${product.productId}" data-testid="delete-product-${product.productId}" ${active ? '' : 'disabled'}>${active ? 'Deactivate' : 'Inactive'}</button>
           </div>` : `
           <div class="product-actions">
-            <input class="input" type="number" min="1" max="${Math.max(1, available)}" value="1" id="qty-${product.productId}" aria-label="Quantity" data-testid="quantity-${product.productId}" ${available < 1 ? 'disabled' : ''} />
-            <button class="btn btn-primary" data-add-product="${product.productId}" data-available="${available}" ${available < 1 ? 'disabled' : ''} data-testid="add-cart-${product.productId}">${available < 1 ? 'No more available' : 'Add to cart'}</button>
+            <input class="input" type="number" min="1" max="${Math.max(1, available)}" value="1" id="qty-${product.productId}" aria-label="Quantity" data-testid="quantity-${product.productId}" ${(available < 1 || cartUnavailable) ? 'disabled' : ''} />
+            <button class="btn btn-primary" data-add-product="${product.productId}" data-available="${available}" ${(available < 1 || cartUnavailable) ? 'disabled' : ''} data-testid="add-cart-${product.productId}">${cartUnavailable ? 'Cart unavailable' : (available < 1 ? 'No more available' : 'Add to cart')}</button>
           </div>`}
       </div>
     </article>`;
@@ -1250,12 +1304,25 @@ function paymentMethodLabel(methodName) {
 }
 
 async function renderCheckout(container, force = false) {
-  const [cart, addresses, paymentMethods] = await Promise.all([
+  const [cartResult, addressResult, paymentResult] = await Promise.allSettled([
     force || !state.cart ? api.cart() : Promise.resolve(state.cart),
     force || !state.addresses.length ? api.addresses() : Promise.resolve(state.addresses),
     force || !state.paymentMethods.length ? api.paymentMethods() : Promise.resolve(state.paymentMethods)
   ]);
+  const failures = [
+    ['Cart', cartResult],
+    ['Addresses', addressResult],
+    ['Payment methods', paymentResult]
+  ].filter(([, result]) => result.status === 'rejected');
+  if (failures.length) {
+    container.innerHTML = `<div class="card card-pad">${empty('Checkout cannot load required data', failures.map(([name, result]) => `${name}: ${result.reason?.message || 'Request failed'}`).join(' | '))}</div>`;
+    return;
+  }
+  const cart = cartResult.value;
+  const addresses = addressResult.value;
+  const paymentMethods = paymentResult.value;
   state.cart = cart;
+  state.cartLoadError = null;
   state.addresses = addresses;
   state.paymentMethods = (Array.isArray(paymentMethods) ? paymentMethods : [])
     .map((method) => ({ ...method, methodName: canonicalPaymentMethodName(method.methodName) }))
