@@ -532,6 +532,7 @@ function bindAuthEvents() {
     } catch (error) {
       clearSession();
       resetAuthenticatedState();
+       startRequestScope();
       toast(error.message, 'error', 'Login failed');
     } finally {
       setBusy(button, false);
