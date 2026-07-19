@@ -4,10 +4,8 @@ import {
   getSession,
   saveSession,
   clearSession,
-  getConfig,
   startRequestScope,
-  cancelRequestScope,
-  isApiLogEnabled
+  cancelRequestScope
 } from './api.js';
 import { VIETNAM_PHONE_PATTERN, sanitizePhoneValue, isValidVietnamPhone } from './validation.js';
 
@@ -26,7 +24,6 @@ const state = {
   ordersPage: { page: 0, size: 10, totalElements: 0, totalPages: 0 },
   adminOrders: [],
   adminOrdersPage: { page: 0, size: 10, totalElements: 0, totalPages: 0 },
-  apiLogs: [],
   requestStatus: {},
   search: '',
   debouncedSearch: '',
@@ -105,13 +102,38 @@ function productCategoryChoices() {
     .sort((a, b) => englishCategoryName(a.rawName).localeCompare(englishCategoryName(b.rawName), 'en'));
 }
 
+function inlineErrorElement(input) {
+  if (!input) return null;
+  const field = input.closest('.field') || input.parentElement;
+  let error = field?.querySelector(`[data-inline-error-for="${input.name || input.id}"]`);
+  if (!error && field) {
+    error = document.createElement('p');
+    error.className = 'error-text';
+    error.dataset.inlineErrorFor = input.name || input.id;
+    error.hidden = true;
+    field.appendChild(error);
+  }
+  return error;
+}
+
+function setInlineValidity(input, message = '') {
+  if (!input) return;
+  input.setCustomValidity(message);
+  const error = inlineErrorElement(input);
+  if (!error) return;
+  error.textContent = message;
+  error.hidden = !message;
+  input.classList.toggle('input-error', Boolean(message));
+}
+
 function bindPhoneOnlyInput(input) {
   if (!input) return;
   const validate = () => {
     const value = input.value.trim();
-    input.setCustomValidity(value && !isValidVietnamPhone(value)
-      ? 'Use exactly 10 digits beginning with 03, 05, 07, 08 or 09, or use +84 instead of the leading 0.'
-      : '');
+    const message = value && !isValidVietnamPhone(value)
+      ? 'Phone number must be 10 digits, or use +84 instead of the leading 0.'
+      : '';
+    setInlineValidity(input, message);
   };
   input.addEventListener('input', () => {
     const cursorAtEnd = input.selectionStart === input.value.length;
@@ -121,6 +143,16 @@ function bindPhoneOnlyInput(input) {
   });
   input.addEventListener('blur', validate);
   validate();
+}
+
+function bindRequiredTextInput(input, label = 'This field') {
+  if (!input) return;
+  const validate = () => setInlineValidity(
+    input,
+    input.required && !input.value.trim() ? `${label} cannot be empty.` : ''
+  );
+  input.addEventListener('input', validate);
+  input.addEventListener('blur', validate);
 }
 
 function stopPaymentPolling() {
@@ -147,7 +179,6 @@ function resetAuthenticatedState() {
   state.ordersPage = { page: 0, size: 10, totalElements: 0, totalPages: 0 };
   state.adminOrders = [];
   state.adminOrdersPage = { page: 0, size: 10, totalElements: 0, totalPages: 0 };
-  state.apiLogs = [];
   state.requestStatus = {};
   state.search = '';
   state.debouncedSearch = '';
@@ -256,7 +287,7 @@ function empty(title, text) {
 function requestMetric(icon, label, value, requestKey) {
   const result = state.requestStatus[requestKey];
   if (result?.ok === false) {
-    return `<div class="card metric metric-error"><div class="metric-icon">!</div><div><span>${escapeHtml(label)}</span><strong>Unavailable</strong><small>${escapeHtml(result.error || 'Request failed')}</small></div></div>`;
+    return `<div class="card metric metric-error"><div class="metric-icon">!</div><div><span>${escapeHtml(label)}</span><strong>Unavailable</strong><small>${escapeHtml(result.error || 'This information could not be loaded.')}</small></div></div>`;
   }
   return metric(icon, label, value);
 }
@@ -264,7 +295,7 @@ function requestMetric(icon, label, value, requestKey) {
 function recordRequestStatus(key, result) {
   state.requestStatus[key] = result.status === 'fulfilled'
     ? { ok: true, error: '' }
-    : { ok: false, error: result.reason?.message || 'Request failed' };
+    : { ok: false, error: result.reason?.message || 'This information could not be loaded.' };
 }
 
 function paginationMarkup(pageInfo, prefix) {
@@ -352,9 +383,7 @@ function navItems() {
       ['dashboard', '▦', 'Dashboard'],
       ['admin-products', '□', 'Products'],
       ['admin-orders', '≡', 'Orders'],
-      ['profile', '●', 'Profile'],
-      ['test-lab', '⌁', 'Test Lab'],
-      ['settings', '⚙', 'Settings']
+      ['profile', '●', 'Profile']
     ];
   }
   return [
@@ -364,24 +393,20 @@ function navItems() {
     ['addresses', '⌂', 'Addresses'],
     ['checkout', '✓', 'Checkout'],
     ['orders', '≡', 'My Orders'],
-    ['profile', '●', 'Profile'],
-    ['test-lab', '⌁', 'Test Lab'],
-    ['settings', '⚙', 'Settings']
+    ['profile', '●', 'Profile']
   ];
 }
 
 const viewTitles = {
-  dashboard: ['Dashboard', 'Live overview from the connected backend'],
-  products: ['Product Catalog', 'Search products and test cart operations'],
-  cart: ['Shopping Cart', 'Update quantities, remove items, and validate totals'],
-  addresses: ['Delivery Addresses', 'Create and update customer shipping information'],
-  checkout: ['Checkout', 'Preview voucher pricing and create an order'],
-  orders: ['My Orders', 'Review order and payment workflow states'],
-  'admin-products': ['Product Management', 'Create, update, and delete products'],
-  'admin-orders': ['Order Administration', 'Update order and payment statuses'],
-  profile: ['My Profile', 'View account details and update full name or phone number'],
-  'test-lab': ['Software Test Lab', 'Run API checks and inspect request/response evidence'],
-  settings: ['Environment Settings', 'View the fixed API endpoint and safe testing defaults']
+  dashboard: ['Dashboard', 'Overview of your account and recent activity'],
+  products: ['Product Catalog', 'Browse available products and add items to your cart'],
+  cart: ['Shopping Cart', 'Review your items, quantities, and total'],
+  addresses: ['Delivery Addresses', 'Manage where your orders will be delivered'],
+  checkout: ['Checkout', 'Confirm delivery, discounts, and payment'],
+  orders: ['My Orders', 'Track your purchases and payment status'],
+  'admin-products': ['Product Management', 'Manage the store catalog and availability'],
+  'admin-orders': ['Order Management', 'Review purchases, payments, and delivery status'],
+  profile: ['My Profile', 'Update your personal details and contact information']
 };
 
 function renderAuth() {
@@ -393,37 +418,32 @@ function renderAuth() {
         <div>
           <div class="brand">
             <div class="brand-mark">S</div>
-            <div><h1>SWT301 Commerce</h1><p>Functional Testing Client</p></div>
+            <div><h1>SWT301 Commerce</h1><p>Online Store</p></div>
           </div>
-          <h1>A real frontend for testing every implemented backend workflow.</h1>
-          <p>This client uses the actual Spring Boot API. It includes deterministic controls, field validation, role-based screens, and a built-in request log for test evidence.</p>
+          <h1>Everything you need for a simple shopping experience.</h1>
+          <p>Browse products, manage your cart, choose a delivery address, place orders, and follow payment progress in one place.</p>
           <div class="feature-list">
-            <div class="feature-row">✓ Customer and Admin role separation</div>
-            <div class="feature-row">✓ Cart, voucher, checkout, payment, and order workflows</div>
-            <div class="feature-row">✓ Stable data-testid selectors for automation</div>
-            <div class="feature-row">✓ No mock product or order data</div>
+            <div class="feature-row">✓ Easy product browsing and search</div>
+            <div class="feature-row">✓ Cart, voucher, checkout, and payment options</div>
+            <div class="feature-row">✓ Delivery address and profile management</div>
+            <div class="feature-row">✓ Clear order and payment tracking</div>
           </div>
         </div>
-        <p>Backend expected at <strong>http://localhost:8080</strong> · Frontend runs at <strong>http://localhost:5173</strong></p>
+        <p>Customer shopping and administrator management in one secure workspace.</p>
       </section>
       <section class="auth-panel">
         <div class="auth-card">
           <div class="brand" style="color:#172033;padding:0;margin-bottom:28px">
             <div class="brand-mark" style="color:white">S</div>
-            <div><h1>SWT301 Test Client</h1><p>Backend-connected frontend</p></div>
+            <div><h1>SWT301 Commerce</h1><p>Secure account access</p></div>
           </div>
           <h2>${state.authTab === 'login' ? 'Welcome back' : 'Create a customer account'}</h2>
-          <p>${state.authTab === 'login' ? 'Sign in with a backend account to begin testing.' : 'Registration always creates a CUSTOMER account.'}</p>
+          <p>${state.authTab === 'login' ? 'Sign in to continue to your account.' : 'Create a customer account to start shopping.'}</p>
           <div class="tabs">
             <button class="tab ${state.authTab === 'login' ? 'active' : ''}" data-auth-tab="login">Login</button>
             <button class="tab ${state.authTab === 'register' ? 'active' : ''}" data-auth-tab="register">Register</button>
           </div>
           ${state.authTab === 'login' ? loginForm() : registerForm()}
-          <div class="card card-pad" style="margin-top:18px;box-shadow:none;background:#f8fafc">
-            <strong style="font-size:12px">Connection check</strong>
-            <p class="help" style="margin:6px 0 12px">Tests the public <code>GET /api/products</code> endpoint.</p>
-            <button class="btn btn-secondary btn-sm" id="connection-check" data-testid="connection-check">Check backend</button>
-          </div>
         </div>
       </section>
     </main>`;
@@ -515,18 +535,6 @@ function bindAuthEvents() {
     passwordInput.focus();
   });
 
-  document.querySelector('#connection-check')?.addEventListener('click', async (event) => {
-    setBusy(event.currentTarget, true, 'Checking...');
-    try {
-      const products = await api.productsPage({ page: 0, size: 1 });
-      toast(`Backend is reachable. ${products.totalElements || 0} active product(s) available.`);
-    } catch (error) {
-      toast(error.message, 'error', 'Connection failed');
-    } finally {
-      setBusy(event.currentTarget, false);
-    }
-  });
-
   document.querySelector('#login-form')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const button = event.submitter;
@@ -550,7 +558,7 @@ function bindAuthEvents() {
       if (!hasValidRole()) {
         state.session = null;
         clearSession();
-        throw new Error('The account role is invalid and cannot be opened as CUSTOMER.');
+        throw new Error('This account type is not supported.');
       }
       saveSession(session);
       state.view = 'dashboard';
@@ -559,7 +567,11 @@ function bindAuthEvents() {
     } catch (error) {
       clearSession();
       resetAuthenticatedState();
-      toast(error.message, 'error', 'Login failed');
+      startRequestScope();
+      const message = error.status === 401
+        ? 'Username or password is incorrect, please try again!'
+        : error.message;
+      toast(message, 'error', 'Login failed');
     } finally {
       setBusy(button, false);
     }
@@ -585,11 +597,22 @@ function bindAuthEvents() {
         if (identifier) identifier.value = payload.username;
       }, 0);
     } catch (error) {
+       clearSession();
+  resetAuthenticatedState();
+  startRequestScope(); //
       toast(error.message, 'error', 'Registration failed');
     } finally {
       setBusy(button, false);
     }
   });
+}
+
+function allowedViewsForRole() {
+  return new Set(navItems().map(([id]) => id));
+}
+
+function ensureAllowedView() {
+  if (!allowedViewsForRole().has(state.view)) state.view = 'dashboard';
 }
 
 function renderShell() {
@@ -598,15 +621,16 @@ function renderShell() {
     clearSession();
     resetAuthenticatedState();
     renderAuth();
-    return toast('This account has an invalid role. Access was blocked instead of defaulting to CUSTOMER.', 'error', 'Invalid role');
+    return toast('This account type is not supported.', 'error', 'Access unavailable');
   }
+  ensureAllowedView();
   const [title, subtitle] = viewTitles[state.view] || viewTitles.dashboard;
   app.innerHTML = `
     <div class="app-shell">
       <aside class="sidebar" id="sidebar">
         <div class="brand">
           <div class="brand-mark">S</div>
-          <div><h1>SWT301 Commerce</h1><p>Testing Client</p></div>
+          <div><h1>SWT301 Commerce</h1><p>${isAdmin() ? 'Admin Portal' : 'Customer Portal'}</p></div>
         </div>
         <nav class="nav-list">
           ${navItems().map(([id, icon, label]) => `
@@ -661,6 +685,7 @@ function bindShellEvents() {
 }
 
 async function renderCurrentView(force = false) {
+  ensureAllowedView();
   const container = document.querySelector('#view-content');
   if (!container) return;
   if (state.view !== 'orders') stopPaymentPolling();
@@ -677,8 +702,6 @@ async function renderCurrentView(force = false) {
       case 'admin-products': await renderProducts(container, true, force); break;
       case 'admin-orders': await renderAdminOrders(container, force); break;
       case 'profile': await renderProfile(container, force); break;
-      case 'test-lab': renderTestLab(container); break;
-      case 'settings': renderSettings(container); break;
       default: await renderDashboard(container);
     }
   } catch (error) {
@@ -710,7 +733,7 @@ async function renderDashboard(container) {
     const pendingPayments = Number(metrics?.paymentsPendingVerification || 0);
     container.innerHTML = `
       <section class="hero">
-        <div><span class="badge">ADMIN TEST WORKSPACE</span><h2>System control and verification</h2><p>Manage products, inspect orders, approve QR payments, and capture redacted API evidence.</p></div>
+        <div><span class="badge">ADMIN</span><h2>Store overview</h2><p>Manage products, review orders, and confirm customer payments.</p></div>
         <button class="btn btn-primary" data-go="admin-orders">Review orders</button>
       </section>
       <div class="grid grid-4">
@@ -720,8 +743,8 @@ async function renderDashboard(container) {
         ${requestMetric('!', 'Payments to verify', pendingPayments, 'adminMetrics')}
       </div>
       <div class="grid grid-2" style="margin-top:18px">
-        <section class="card"><div class="card-header"><div><h3>Recent orders</h3><p>Most recent backend records</p></div></div>${state.requestStatus.adminOrders?.ok ? ordersTable(state.adminOrders.slice(0, 5), true) : empty('Orders unavailable', state.requestStatus.adminOrders?.error || 'Request failed')}</section>
-        <section class="card card-pad"><h3 style="margin-top:0">Testing readiness</h3>${readinessList()}</section>
+        <section class="card"><div class="card-header"><div><h3>Recent orders</h3><p>Latest customer purchases</p></div></div>${state.requestStatus.adminOrders?.ok ? ordersTable(state.adminOrders.slice(0, 5), true) : empty('Orders unavailable', state.requestStatus.adminOrders?.error || 'This information could not be loaded.')}</section>
+        <section class="card card-pad"><h3 style="margin-top:0">Store status</h3>${readinessList()}</section>
       </div>`;
   } else {
     const [productsResult, cartResult, ordersResult, addressesResult] = await Promise.allSettled([
@@ -745,7 +768,7 @@ async function renderDashboard(container) {
     const cartQuantity = (state.cart?.items || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
     container.innerHTML = `
       <section class="hero">
-        <div><span class="badge">CUSTOMER TEST WORKSPACE</span><h2>Test the full purchase journey</h2><p>Each dashboard area reports its own API failure instead of silently showing zero.</p></div>
+        <div><span class="badge">CUSTOMER</span><h2>Welcome back</h2><p>Browse products, review your cart, and follow your recent orders.</p></div>
         <button class="btn btn-primary" data-go="products">Browse products</button>
       </section>
       <div class="grid grid-4">
@@ -755,8 +778,8 @@ async function renderDashboard(container) {
         ${requestMetric('≡', 'Orders', ordersResult.status === 'fulfilled' ? ordersResult.value.totalElements : '—', 'orders')}
       </div>
       <div class="grid grid-2" style="margin-top:18px">
-        <section class="card"><div class="card-header"><div><h3>Recent orders</h3><p>Your latest backend orders</p></div></div>${state.requestStatus.orders?.ok ? ordersTable(state.orders, false) : empty('Orders unavailable', state.requestStatus.orders?.error || 'Request failed')}</section>
-        <section class="card card-pad"><h3 style="margin-top:0">Current cart</h3>${state.requestStatus.cart?.ok ? `<p class="help">${cartQuantity} total unit(s) across ${state.cart?.items?.length || 0} distinct product(s) · ${money(state.cart?.totalCartPrice)}</p><button class="btn btn-secondary" data-go="cart">Open cart</button>` : empty('Cart unavailable', state.requestStatus.cart?.error || 'Request failed')}</section>
+        <section class="card"><div class="card-header"><div><h3>Recent orders</h3><p>Your latest purchases</p></div></div>${state.requestStatus.orders?.ok ? ordersTable(state.orders, false) : empty('Orders unavailable', state.requestStatus.orders?.error || 'This information could not be loaded.')}</section>
+        <section class="card card-pad"><h3 style="margin-top:0">Current cart</h3>${state.requestStatus.cart?.ok ? `<p class="help">${cartQuantity} total unit(s) across ${state.cart?.items?.length || 0} distinct product(s) · ${money(state.cart?.totalCartPrice)}</p><button class="btn btn-secondary" data-go="cart">Open cart</button>` : empty('Cart unavailable', state.requestStatus.cart?.error || 'This information could not be loaded.')}</section>
       </div>`;
   }
   container.querySelectorAll('[data-go]').forEach((button) => button.addEventListener('click', () => {
@@ -772,12 +795,12 @@ function metric(icon, label, value) {
 
 function readinessList() {
   const checks = [
-    ['Authentication', Boolean(state.session?.token)],
-    ['Product endpoint', state.requestStatus.products?.ok === true],
-    ['Admin order endpoint', state.requestStatus.adminOrders?.ok === true],
-    ['Redacted API evidence', isApiLogEnabled()]
+    ['Account access', Boolean(state.session?.token)],
+    ['Product catalog', state.requestStatus.products?.ok === true],
+    ['Order management', state.requestStatus.adminOrders?.ok === true],
+    ['Store summary', state.requestStatus.adminMetrics?.ok === true]
   ];
-  return checks.map(([label, pass]) => `<div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line)"><span>${label}</span>${statusBadge(pass ? 'READY' : 'FAILED')}</div>`).join('');
+  return checks.map(([label, pass]) => `<div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line)"><span>${label}</span>${statusBadge(pass ? 'AVAILABLE' : 'NEEDS ATTENTION')}</div>`).join('');
 }
 
 async function loadProducts(force = false, adminMode = false) {
@@ -802,7 +825,7 @@ async function loadProducts(force = false, adminMode = false) {
     response = adminMode ? await api.adminProductsPage(params) : await api.productsPage(params);
   } catch (error) {
     if (adminMode) throw error;
-    // Compatibility fallback for backends that still expose only GET /api/products.
+    // Compatibility fallback for older product listings.
     const allProducts = await api.products();
     const search = state.debouncedSearch.toLowerCase();
     const categoryId = params.categoryId;
@@ -949,7 +972,7 @@ function bindAdminProductActions(container) {
     button.addEventListener('click', async () => {
       const id = Number(button.dataset.deleteProduct);
       const product = state.products.find((p) => Number(p.productId) === id);
-      if (!confirm(`Deactivate "${product?.productName || id}"? It will disappear from the customer catalog and its Cloudinary image will be removed.`)) return;
+      if (!confirm(`Deactivate "${product?.productName || id}"? It will no longer appear in the customer catalog, and its current image will be removed.`)) return;
       setBusy(button, true, 'Deactivating...');
       try {
         const response = await api.deleteProduct(id);
@@ -966,7 +989,7 @@ function bindAdminProductActions(container) {
 function openProductModal(product = null) {
   const categories = productCategoryChoices();
   if (!categories.length) {
-    return toast('No categories were returned by GET /api/reference/categories. Create a category in the database before managing products.', 'error');
+    return toast('No product categories are available. Add a category before creating or editing products.', 'error');
   }
   const selectedCategoryId = product ? Number(product.categoryId) : null;
   showModal({
@@ -990,7 +1013,7 @@ function openProductModal(product = null) {
           <div id="product-image-file-details"></div>
           <button class="btn btn-danger btn-sm" type="button" id="remove-selected-product-image">Remove selected file</button>
         </div>
-        <p class="help">The browser validates MIME type, extension, and the 5 MB limit. The backend repeats validation using the actual file signature.</p>
+        <p class="help">Choose a JPG or PNG image up to 5 MB. The image will be checked before it is saved.</p>
       </form>`,
     footer: `<button class="btn btn-secondary" data-close-modal>Cancel</button><button class="btn btn-primary" id="save-product" data-testid="save-product">${product ? 'Save changes' : 'Create product'}</button>`
   });
@@ -1071,7 +1094,7 @@ async function renderCart(container, force = false) {
             </tr>`).join('')}</tbody>
         </table></div>
         <div class="card-pad" style="display:flex;justify-content:flex-end;gap:10px"><button class="btn btn-primary" id="go-checkout">Continue to checkout</button></div>`
-        : empty('Your cart is empty', 'Add products from the catalog to begin the checkout workflow.')}
+        : empty('Your cart is empty', 'Add products from the catalog to continue to checkout.')}
     </section>`;
 
   container.querySelectorAll('[data-update-cart]').forEach((button) => button.addEventListener('click', async () => {
@@ -1203,12 +1226,12 @@ function openAddressModal(address = null) {
     body: `
       <form id="address-form" data-testid="address-form">
         <div class="form-grid">
-          <div class="field"><label>Receiver name</label><input class="input" name="receiverName" value="${escapeHtml(address?.receiverName || '')}" required data-testid="receiver-name" /></div>
+          <div class="field"><label>Receiver name</label><input class="input" name="receiverName" maxlength="100" value="${escapeHtml(address?.receiverName || '')}" required data-testid="receiver-name" /></div>
           <div class="field"><label>Vietnamese phone</label><input class="input" id="receiver-phone" name="receiverPhone" type="tel" inputmode="tel" maxlength="12" value="${escapeHtml(address?.receiverPhone || '')}" pattern="${VIETNAM_PHONE_PATTERN}" required data-testid="receiver-phone" /></div>
-          <div class="field"><label>Province / City</label><input class="input" name="province" value="${escapeHtml(address?.province || '')}" required data-testid="province" /></div>
-          <div class="field"><label>District</label><input class="input" name="district" value="${escapeHtml(address?.district || '')}" required data-testid="district" /></div>
-          <div class="field"><label>Ward</label><input class="input" name="ward" value="${escapeHtml(address?.ward || '')}" required data-testid="ward" /></div>
-          <div class="field"><label>Street / House number</label><input class="input" name="street" value="${escapeHtml(address?.street || '')}" required data-testid="street" /></div>
+          <div class="field"><label>Province / City</label><input class="input" name="province" maxlength="100" value="${escapeHtml(address?.province || '')}" required data-testid="province" /></div>
+          <div class="field"><label>District</label><input class="input" name="district" maxlength="100" value="${escapeHtml(address?.district || '')}" required data-testid="district" /></div>
+          <div class="field"><label>Ward</label><input class="input" name="ward" maxlength="100" value="${escapeHtml(address?.ward || '')}" required data-testid="ward" /></div>
+          <div class="field"><label>Street / House number</label><input class="input" name="street" maxlength="255" value="${escapeHtml(address?.street || '')}" required data-testid="street" /></div>
         </div>
         <label style="display:flex;align-items:center;gap:8px;margin-top:15px"><input type="checkbox" name="isDefault" ${(address?.isDefault || mustBeDefault) ? 'checked' : ''} ${mustBeDefault ? 'disabled' : ''} /> Set as default address</label>
         ${mustBeDefault ? '<p class="help">At least one saved address must remain the default address.</p>' : ''}
@@ -1217,6 +1240,7 @@ function openAddressModal(address = null) {
     footer: `<button class="btn btn-secondary" data-close-modal>Cancel</button><button class="btn btn-primary" id="save-address" data-testid="save-address">Save address</button>`
   });
   bindPhoneOnlyInput(document.querySelector('#receiver-phone'));
+  bindRequiredTextInput(document.querySelector('[name="receiverName"]'), 'Name');
   document.querySelector('#save-address').addEventListener('click', async (event) => {
     const form = document.querySelector('#address-form');
     if (!form.reportValidity()) return;
@@ -1250,23 +1274,67 @@ function openAddressModal(address = null) {
 async function renderProfile(container, force = false) {
   if (force || !state.profile) state.profile = await api.profile();
   const profile = state.profile;
+  const displayName = (profile.fullName || profile.username || 'User').trim();
+  const initials = displayName
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() || '')
+    .join('') || 'U';
+
   container.innerHTML = `
-    <div class="grid grid-2">
-      <section class="card card-pad">
-        <h3 style="margin-top:0">Account profile</h3>
-        <form id="profile-form" data-testid="profile-form">
-          <div class="field"><label>Username</label><input class="input" value="${escapeHtml(profile.username)}" readonly data-testid="profile-username" /><p class="help">Username is read-only so the current JWT remains valid.</p></div>
-          <div class="field" style="margin-top:14px"><label>Email</label><input class="input" value="${escapeHtml(profile.email || '')}" readonly data-testid="profile-email" /></div>
-          <div class="field" style="margin-top:14px"><label>Full name</label><input class="input" name="fullName" maxlength="100" value="${escapeHtml(profile.fullName || '')}" required data-testid="profile-full-name" /></div>
-          <div class="field" style="margin-top:14px"><label>Vietnamese phone</label><input class="input" id="profile-phone" name="phone" type="tel" inputmode="tel" maxlength="12" pattern="${VIETNAM_PHONE_PATTERN}" value="${escapeHtml(profile.phone || '')}" required data-testid="profile-phone" /><p class="help">Accepted: 10-digit local number or +84 format.</p></div>
-          <div class="form-actions"><button class="btn btn-primary" type="submit" data-testid="save-profile">Save profile</button></div>
+    <div class="profile-page">
+      <section class="card profile-card">
+        <header class="profile-hero">
+          <div class="profile-avatar" aria-hidden="true">${escapeHtml(initials)}</div>
+          <div class="profile-hero-copy">
+            <span class="profile-eyebrow">Personal profile</span>
+            <h3>${escapeHtml(displayName)}</h3>
+            <p>Keep your name and phone number current for delivery and order communication.</p>
+          </div>
+        </header>
+
+        <form id="profile-form" class="profile-form" data-testid="profile-form">
+          <section class="profile-section" aria-labelledby="profile-sign-in-heading">
+            <div class="profile-section-heading">
+              <h4 id="profile-sign-in-heading">Sign-in details</h4>
+              <p>These fields identify your account and cannot be changed here.</p>
+            </div>
+            <div class="form-grid profile-fields">
+              <div class="field">
+                <label>Username</label>
+                <input class="input profile-readonly" value="${escapeHtml(profile.username)}" readonly data-testid="profile-username" />
+              </div>
+              <div class="field">
+                <label>Email</label>
+                <input class="input profile-readonly" value="${escapeHtml(profile.email || '')}" readonly data-testid="profile-email" />
+              </div>
+            </div>
+          </section>
+
+          <section class="profile-section" aria-labelledby="profile-personal-heading">
+            <div class="profile-section-heading">
+              <h4 id="profile-personal-heading">Personal details</h4>
+              <p>These details are used for your profile and delivery contact information.</p>
+            </div>
+            <div class="form-grid profile-fields">
+              <div class="field">
+                <label>Full name</label>
+                <input class="input" name="fullName" maxlength="100" value="${escapeHtml(profile.fullName || '')}" required data-testid="profile-full-name" />
+              </div>
+              <div class="field">
+                <label>Vietnamese phone</label>
+                <input class="input" id="profile-phone" name="phone" type="tel" inputmode="tel" maxlength="12" pattern="${VIETNAM_PHONE_PATTERN}" value="${escapeHtml(profile.phone || '')}" required data-testid="profile-phone" />
+                <p class="help">Use exactly 10 digits beginning with 0, or the equivalent +84 format.</p>
+              </div>
+            </div>
+          </section>
+
+          <footer class="profile-actions">
+            <p>Your username and email remain unchanged when saving.</p>
+            <button class="btn btn-primary" type="submit" data-testid="save-profile">Save changes</button>
+          </footer>
         </form>
-      </section>
-      <section class="card card-pad">
-        <h3 style="margin-top:0">Account information</h3>
-        <div class="test-case"><h4>Role</h4><p>${escapeHtml(profile.role)}</p></div>
-        <div class="test-case"><h4>User ID</h4><p>${escapeHtml(profile.userId)}</p></div>
-        <div class="test-case"><h4>Role validation</h4><p>Only CUSTOMER and ADMIN sessions are accepted. Unknown roles are blocked instead of being shown as Customer.</p></div>
       </section>
     </div>`;
   bindPhoneOnlyInput(document.querySelector('#profile-phone'));
@@ -1293,7 +1361,7 @@ async function renderProfile(container, force = false) {
 
 function paymentMethodHelp(methodName) {
   return normalizeName(methodName) === 'QR_CODE'
-    ? '<div class="payment-help qr"><strong>QR online payment</strong><p>After the order is created, the backend serves the exact MB Bank QR image configured for this project. Use the displayed order total and transfer note, then upload the receipt.</p></div>'
+    ? '<div class="payment-help qr"><strong>QR online payment</strong><p>After the order is created, scan the displayed MB Bank QR code, confirm the order total and transfer note, then upload your receipt.</p></div>'
     : '<div class="payment-help cod"><strong>Cash on delivery (COD)</strong><p>Pay the courier when the order arrives. The order remains PENDING until the delivery workflow is completed.</p></div>';
 }
 
@@ -1315,7 +1383,7 @@ async function renderCheckout(container, force = false) {
     ['Payment methods', paymentResult]
   ].filter(([, result]) => result.status === 'rejected');
   if (failures.length) {
-    container.innerHTML = `<div class="card card-pad">${empty('Checkout cannot load required data', failures.map(([name, result]) => `${name}: ${result.reason?.message || 'Request failed'}`).join(' | '))}</div>`;
+    container.innerHTML = `<div class="card card-pad">${empty('Checkout is temporarily unavailable', failures.map(([name, result]) => `${name}: ${result.reason?.message || 'This information could not be loaded.'}`).join(' | '))}</div>`;
     return;
   }
   const cart = cartResult.value;
@@ -1329,11 +1397,11 @@ async function renderCheckout(container, force = false) {
     .filter((method) => Number(method.paymentMethodId) > 0 && ['COD', 'QR_CODE'].includes(method.methodName));
 
   if (!cart.items?.length) {
-    container.innerHTML = `<div class="card">${empty('Checkout require at least one cart item', 'Add at least one product to the cart before opening checkout.')}</div>`;
+    container.innerHTML = `<div class="card">${empty('Checkout requires at least one cart item', 'Add at least one product to the cart before opening checkout.')}</div>`;
     return;
   }
   if (!state.paymentMethods.length) {
-    container.innerHTML = `<div class="card card-pad">${empty('Checkout unavailable', 'The backend did not return a valid COD or QR_CODE payment method.')}</div>`;
+    container.innerHTML = `<div class="card card-pad">${empty('Checkout unavailable', 'No supported payment method is currently available.')}</div>`;
     return;
   }
 
@@ -1418,6 +1486,7 @@ async function renderCheckout(container, force = false) {
 
   setAddressMode(initialAddressMode);
   bindPhoneOnlyInput(document.querySelector('#checkout-manual-phone'));
+  bindRequiredTextInput(checkoutForm.elements.manualReceiverName, 'Name');
   checkoutForm.querySelectorAll('input[name="addressMode"]').forEach((radio) => radio.addEventListener('change', (event) => setAddressMode(event.target.value)));
   checkoutForm.querySelectorAll('input[name="paymentMethodId"]').forEach((radio) => radio.addEventListener('change', (event) => { document.querySelector('#payment-method-help').innerHTML = paymentMethodHelp(event.target.dataset.methodName); resetCheckoutIdentity(); }));
   checkoutForm.addEventListener('input', (event) => { if (event.target.id !== 'checkout-voucher') resetCheckoutIdentity(); });
@@ -1444,7 +1513,7 @@ async function renderCheckout(container, force = false) {
     }
     const paymentMethodId = Number(data.get('paymentMethodId'));
     const paymentMethod = state.paymentMethods.find((method) => Number(method.paymentMethodId) === paymentMethodId);
-    if (!paymentMethod) return toast('Choose a valid COD or QR payment method returned by the backend.', 'error');
+    if (!paymentMethod) return toast('Choose an available COD or QR payment method.', 'error');
     const addressMode = String(data.get('addressMode'));
     const payload = { paymentMethodId, voucherCode: voucher || null, note: String(data.get('note') || '').trim(), addressId: null, manualAddress: null };
     if (addressMode === 'manual') {
@@ -1460,7 +1529,7 @@ async function renderCheckout(container, force = false) {
       if (!Number.isInteger(payload.addressId) || payload.addressId <= 0) return toast('Choose a saved delivery address.', 'error');
     }
     const isQr = paymentMethod.methodName === 'QR_CODE';
-    if (!confirm(`Place this ${isQr ? 'QR online payment' : 'cash on delivery'} order? Current product prices and stock will be checked again by the backend.`)) return;
+    if (!confirm(`Place this ${isQr ? 'QR online payment' : 'cash on delivery'} order? Product prices and availability will be confirmed before the order is placed.`)) return;
     setBusy(event.submitter, true, 'Creating order...');
     try {
       const key = state.checkoutIdempotencyKey || createIdempotencyKey();
@@ -1507,7 +1576,7 @@ function openCodOrderSuccessModal(order) {
         <div><span>Payment</span><strong>Cash on delivery</strong></div>
         <div><span>Total</span><strong>${money(order.total)}</strong></div>
       </div>
-      <p class="help">Pay the courier when the order is delivered. Stock and voucher usage were recorded by the backend.</p>
+      <p class="help">Pay the courier when the order is delivered. Your items and discount have been reserved for this order.</p>
     </div>`,
     footer: '<button class="btn btn-primary" id="view-cod-order" data-testid="view-cod-order">View My Orders</button>'
   });
@@ -1515,16 +1584,21 @@ function openCodOrderSuccessModal(order) {
 }
 
 function paymentQrDetailsMarkup(info, imageUrl, adminView = false) {
-  return `<div class="payment-qr"><img src="${escapeHtml(imageUrl)}" alt="Configured MB Bank payment QR for ${escapeHtml(info.orderCode)}" data-testid="payment-qr-image" /><div>
+  return `<div class="payment-qr"><img src="${escapeHtml(imageUrl)}" alt="MB Bank payment QR for ${escapeHtml(info.orderCode)}" data-testid="payment-qr-image" /><div>
     ${statusBadge(info.paymentStatus || 'AWAITING_PAYMENT', 'Payment')}
     <h3>${escapeHtml(info.orderCode)}</h3><p class="qr-amount">${money(info.amount)}</p>
-    <div class="qr-bank-details"><div><span>Payment recipient</span><strong>Use the bank and account encoded in this exact QR image</strong></div><div><span>Transfer note</span><strong>${escapeHtml(info.transferNote || info.orderCode)}</strong></div></div>
-    <p class="help">${adminView ? "This is the project's exact configured MB Bank QR image. Compare the protected receipt with the displayed order amount and transfer note before verification." : 'Scan this exact MB Bank QR image, confirm the displayed order amount and transfer note, then upload your receipt.'}</p>
+    <div class="qr-bank-details">
+      <div><span>Bank</span><strong>${escapeHtml(info.bankName || info.bankId || 'MB Bank')}</strong></div>
+      <div><span>Account name</span><strong>${escapeHtml(info.accountName || 'Payment account')}</strong></div>
+      <div><span>Account number</span><strong>${escapeHtml(info.accountNumber || 'See the encoded QR image')}</strong></div>
+      <div><span>Transfer note</span><strong>${escapeHtml(info.transferNote || info.orderCode)}</strong></div>
+    </div>
+    <p class="help">${adminView ? "Use this MB Bank QR image together with the displayed order amount and transfer note when reviewing the customer receipt." : 'Scan the displayed MB Bank QR code, confirm the order amount and transfer note, then upload your receipt.'}</p>
   </div></div>`;
 }
 
 async function openConfiguredPaymentQrModal({ orderId, adminView = false, title = 'Order payment QR' } = {}) {
-  showModal({ title, large: true, body: `<div id="payment-qr-content">${loading('Loading configured MB Bank QR...')}</div>`, footer: '<button class="btn btn-secondary" data-close-modal>Close</button>' });
+  showModal({ title, large: true, body: `<div id="payment-qr-content">${loading('Loading payment QR...')}</div>`, footer: '<button class="btn btn-secondary" data-close-modal>Close</button>' });
   try {
     const [info, blob] = await Promise.all([
       adminView ? api.adminPaymentQrInfo(orderId) : api.paymentQrInfo(orderId),
@@ -1542,8 +1616,8 @@ async function openConfiguredPaymentQrModal({ orderId, adminView = false, title 
 }
 
 async function openPaymentQrModal(orderId) {
-  showModal({ title: `QR payment for order #${orderId}`, large: true, body: `<div id="payment-qr-content">${loading('Loading configured MB Bank QR...')}</div>`, footer: '<button class="btn btn-secondary" data-close-modal>Close</button><button class="btn btn-primary" id="payment-upload-receipt" data-testid="payment-upload-receipt">Upload payment receipt</button>' });
-  document.querySelector('#payment-upload-receipt')?.addEventListener('click', () => { closeModal(); openQrModal(orderId); });
+  showModal({ title: `QR payment for order #${orderId}`, large: true, body: `<div id="payment-qr-content">${loading('Loading payment QR...')}</div>`, footer: '<button class="btn btn-secondary" data-close-modal>Close</button><button class="btn btn-primary" id="payment-upload-receipt" data-testid="payment-upload-receipt">Upload payment receipt</button>' });
+  document.querySelector('#payment-upload-receipt')?.addEventListener('click', () => { closeModal(); openQrModal(orderId, { autoOpenFilePicker: true }); });
   try {
     const [info, blob] = await Promise.all([api.paymentQrInfo(orderId), api.paymentQrCode(orderId)]);
     const modal = document.querySelector('#active-modal');
@@ -1565,7 +1639,12 @@ async function renderOrders(container, force = false) {
     state.ordersPage = { page: page.page, size: page.size, totalElements: page.totalElements, totalPages: page.totalPages };
   }
   stopPaymentPolling();
-  container.innerHTML = `<div class="toolbar" style="justify-content:flex-end"><button class="btn btn-secondary" id="refresh-payment-status" data-testid="refresh-payment-status">↻ Refresh payment status</button></div><div class="grid">${state.orders.length ? state.orders.map(orderCard).join('') : `<div class="card">${empty('No order history', 'Complete checkout to create an order.')}</div>`}</div>${paginationMarkup(state.ordersPage, 'orders')}`;
+  const orderHistorySummary = state.orders.length ? `<section class="card order-history-summary"><div class="card-header"><div><h3>Order history</h3><p>Review order IDs, dates, totals and current statuses.</p></div></div><div class="table-wrap"><table data-testid="order-history-table"><thead><tr><th>Order ID</th><th>Date</th><th>Total</th><th>Status</th></tr></thead><tbody>${state.orders.map((order) => `<tr><td><strong>${escapeHtml(order.orderCode)}</strong></td><td>${dateTime(order.createdAt)}</td><td>${money(order.total)}</td><td>${statusBadge(order.status)}</td></tr>`).join('')}</tbody></table></div></section>` : '';
+  const orderHistoryContent = state.orders.length
+    ? `${orderHistorySummary}<div class="grid">${state.orders.map(orderCard).join('')}</div>`
+    : `<div class="card"><div class="empty"><strong>You have no orders yet</strong>Complete checkout to create your first order.<div style="margin-top:16px"><button class="btn btn-primary" id="continue-shopping" data-testid="continue-shopping">Continue Shopping</button></div></div></div>`;
+  container.innerHTML = `<div class="toolbar" style="justify-content:flex-end"><button class="btn btn-secondary" id="refresh-payment-status" data-testid="refresh-payment-status">↻ Refresh payment status</button></div>${orderHistoryContent}${paginationMarkup(state.ordersPage, 'orders')}`;
+  document.querySelector('#continue-shopping')?.addEventListener('click', () => { state.view = 'products'; renderCurrentView(); });
   bindPagination(container, 'orders', state.ordersPage, async (page) => { state.ordersPage.page = page; state.orders = []; await renderOrders(container, true); });
   document.querySelector('#refresh-payment-status')?.addEventListener('click', async (event) => { setBusy(event.currentTarget, true, 'Refreshing...'); try { state.orders=[]; await renderOrders(container, true); toast('Order and payment statuses refreshed.'); } catch (error) { if (!error.authExpired && !error.cancelled) toast(error.message, 'error'); setBusy(event.currentTarget, false); } });
   container.querySelectorAll('[data-show-payment-qr]').forEach((button) => button.addEventListener('click', () => openPaymentQrModal(Number(button.dataset.showPaymentQr))));
@@ -1621,21 +1700,21 @@ function orderCard(order) {
 }
 
 async function openReceiptModal(orderId, admin = false) {
-  showModal({ title: 'Protected payment receipt', large: true, body: `<div id="receipt-content">${loading('Loading protected receipt...')}</div>`, footer: '<button class="btn btn-secondary" data-close-modal>Close</button>' });
+  showModal({ title: 'Payment receipt', large: true, body: `<div id="receipt-content">${loading('Loading receipt...')}</div>`, footer: '<button class="btn btn-secondary" data-close-modal>Close</button>' });
   try {
     const blob = await (admin ? api.adminReceipt(orderId) : api.customerReceipt(orderId));
     const modal = document.querySelector('#active-modal');
     if (!modal) return;
     const objectUrl = URL.createObjectURL(blob);
     modal.dataset.objectUrl = objectUrl;
-    document.querySelector('#receipt-content').innerHTML = `<div class="receipt-preview"><img src="${objectUrl}" alt="Protected payment receipt" data-testid="receipt-image" /><p class="help">This image was fetched through an authenticated backend endpoint and is not exposed as a permanent public URL.</p></div>`;
+    document.querySelector('#receipt-content').innerHTML = `<div class="receipt-preview"><img src="${objectUrl}" alt="Payment receipt" data-testid="receipt-image" /><p class="help">Receipt image for this order.</p></div>`;
   } catch (error) {
     const content = document.querySelector('#receipt-content');
     if (content && !error.cancelled) content.innerHTML = `<div class="empty"><strong>Receipt unavailable</strong>${escapeHtml(error.message)}</div>`;
   }
 }
 
-async function openQrModal(orderId) {
+async function openQrModal(orderId, { autoOpenFilePicker = false } = {}) {
   showModal({ title: `Pay and upload receipt for order #${orderId}`, large: true, body: `<div id="qr-upload-content">${loading('Loading order-specific payment QR...')}</div>`, footer: '<button class="btn btn-secondary" data-close-modal>Cancel</button><button class="btn btn-primary" id="upload-qr-submit" data-testid="upload-qr-submit" disabled>Upload receipt</button>' });
   let info;
   try {
@@ -1645,20 +1724,137 @@ async function openQrModal(orderId) {
     if (!modal) return;
     const objectUrl = URL.createObjectURL(blob);
     modal.dataset.objectUrl = objectUrl;
-    document.querySelector('#qr-upload-content').innerHTML = `<div class="qr-upload-layout">${paymentQrDetailsMarkup(info, objectUrl, false)}<form id="qr-form"><div class="field"><label>Payment receipt — JPG or PNG, maximum 5 MB</label><input class="input" type="file" id="qr-file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" required data-testid="qr-file" /></div><div id="qr-file-details"></div><p class="help">Uploading again after FAILED safely replaces the old Cloudinary asset.</p></form></div>`;
+    document.querySelector('#qr-upload-content').innerHTML = `
+      <div class="receipt-upload-shell">
+        <section class="receipt-payment-panel" aria-label="Payment QR details">
+          ${paymentQrDetailsMarkup(info, objectUrl, false)}
+        </section>
+        <form id="qr-form" class="receipt-upload-panel" novalidate>
+          <div class="receipt-upload-heading">
+            <div>
+              <span class="eyebrow">Payment evidence</span>
+              <h3>Upload your transfer receipt</h3>
+              <p>Choose a clear JPG or PNG image. The maximum file size is 5 MB.</p>
+            </div>
+            <span class="receipt-required">Required</span>
+          </div>
+
+          <input class="receipt-file-input" type="file" id="qr-file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" required data-testid="qr-file" />
+          <label class="receipt-dropzone" for="qr-file" id="qr-file-dropzone">
+            <span class="receipt-dropzone-icon" aria-hidden="true">⇧</span>
+            <strong>Choose a receipt image</strong>
+            <span>Click to browse for a JPG or PNG file</span>
+            <small>Maximum size: 5 MB</small>
+          </label>
+
+          <div id="qr-file-error" class="field-error receipt-file-error" role="alert" hidden></div>
+          <div id="qr-file-preview" class="receipt-file-preview" hidden>
+            <img id="qr-file-preview-image" alt="Selected payment receipt preview" />
+            <div class="receipt-file-summary">
+              <div id="qr-file-details"></div>
+              <button type="button" class="btn btn-secondary btn-sm" id="qr-file-remove" data-testid="qr-file-remove">Remove image</button>
+            </div>
+          </div>
+
+          <div class="receipt-upload-note">
+            <strong>Before uploading</strong>
+            <span>Check that the amount and transfer note match this order. Uploading again after FAILED replaces the previous receipt.</span>
+          </div>
+        </form>
+      </div>`;
+
     const submit = document.querySelector('#upload-qr-submit');
-    submit.disabled = false;
-    document.querySelector('#qr-file')?.addEventListener('change', (event) => { const file=event.target.files?.[0]; const error=validateImageFile(file,'Receipt'); document.querySelector('#qr-file-details').innerHTML=error?`<p class="field-error">${escapeHtml(error)}</p>`:fileDetailsMarkup(file); if(error) event.target.value=''; });
-    submit.addEventListener('click', async (event) => {
-      const file = document.querySelector('#qr-file')?.files?.[0];
+    const input = document.querySelector('#qr-file');
+    const dropzone = document.querySelector('#qr-file-dropzone');
+    const preview = document.querySelector('#qr-file-preview');
+    const previewImage = document.querySelector('#qr-file-preview-image');
+    const details = document.querySelector('#qr-file-details');
+    const errorBox = document.querySelector('#qr-file-error');
+    const removeButton = document.querySelector('#qr-file-remove');
+    let receiptPreviewUrl = '';
+
+    const clearSelectedReceipt = ({ clearInput = true } = {}) => {
+      if (receiptPreviewUrl) URL.revokeObjectURL(receiptPreviewUrl);
+      receiptPreviewUrl = '';
+      if (clearInput && input) input.value = '';
+      if (previewImage) previewImage.removeAttribute('src');
+      if (details) details.innerHTML = '';
+      if (preview) preview.hidden = true;
+      if (errorBox) { errorBox.hidden = true; errorBox.textContent = ''; }
+      dropzone?.classList.remove('has-file', 'has-error');
+      if (submit) submit.disabled = true;
+    };
+
+    const applySelectedReceipt = (file) => {
+      if (!file) return clearSelectedReceipt();
       const validationError = validateImageFile(file, 'Receipt');
-      if (validationError) return toast(validationError, 'error');
+      clearSelectedReceipt({ clearInput: false });
+      if (validationError) {
+        if (errorBox) { errorBox.textContent = validationError; errorBox.hidden = false; }
+        dropzone?.classList.add('has-error');
+        if (input) input.value = '';
+        return;
+      }
+      receiptPreviewUrl = URL.createObjectURL(file);
+      if (previewImage) previewImage.src = receiptPreviewUrl;
+      if (details) details.innerHTML = fileDetailsMarkup(file);
+      if (preview) preview.hidden = false;
+      dropzone?.classList.add('has-file');
+      if (submit) submit.disabled = false;
+    };
+
+    input?.addEventListener('change', (event) => applySelectedReceipt(event.target.files?.[0]));
+    if (autoOpenFilePicker) setTimeout(() => input?.click(), 0);
+    removeButton?.addEventListener('click', () => clearSelectedReceipt());
+
+    dropzone?.addEventListener('dragover', (event) => {
+      event.preventDefault();
+      dropzone.classList.add('is-dragging');
+    });
+    dropzone?.addEventListener('dragleave', () => dropzone.classList.remove('is-dragging'));
+    dropzone?.addEventListener('drop', (event) => {
+      event.preventDefault();
+      dropzone.classList.remove('is-dragging');
+      const file = event.dataTransfer?.files?.[0];
+      if (!file || !input) return;
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      input.files = transfer.files;
+      applySelectedReceipt(file);
+    });
+
+    submit?.addEventListener('click', async (event) => {
+      const file = input?.files?.[0];
+      const validationError = file ? validateImageFile(file, 'Receipt') : 'Select a payment receipt image.';
+      if (validationError) {
+        if (errorBox) { errorBox.textContent = validationError; errorBox.hidden = false; }
+        dropzone?.classList.add('has-error');
+        return toast(validationError, 'error');
+      }
       setBusy(event.currentTarget, true, 'Uploading...');
-      try { const response = await api.uploadQr(orderId, file); toast(response.message || 'Receipt uploaded.'); closeModal(); state.orders=[]; renderCurrentView(true); }
-      catch (error) { if(!error.cancelled) toast(error.message,'error'); setBusy(event.currentTarget,false); }
+      try {
+        const response = await api.uploadQr(orderId, file);
+        toast(response.message || 'Receipt uploaded.');
+        if (receiptPreviewUrl) URL.revokeObjectURL(receiptPreviewUrl);
+        receiptPreviewUrl = '';
+        closeModal();
+        state.orders = [];
+        renderCurrentView(true);
+      } catch (error) {
+        if (!error.cancelled) toast(error.message, 'error');
+        setBusy(event.currentTarget, false);
+      }
+    });
+
+    modal.addEventListener('click', (event) => {
+      if ((event.target === modal || event.target.closest('[data-close-modal]')) && receiptPreviewUrl) {
+        URL.revokeObjectURL(receiptPreviewUrl);
+        receiptPreviewUrl = '';
+      }
     });
   } catch (error) {
-    const content=document.querySelector('#qr-upload-content'); if(content && !error.cancelled) content.innerHTML=`<div class="empty"><strong>QR unavailable</strong>${escapeHtml(error.message)}</div>`;
+    const content = document.querySelector('#qr-upload-content');
+    if (content && !error.cancelled) content.innerHTML = `<div class="empty"><strong>QR unavailable</strong>${escapeHtml(error.message)}</div>`;
   }
 }
 
@@ -1674,11 +1870,11 @@ async function renderAdminOrders(container, force = false) {
     state.adminOrdersPage = { page: page.page, size: page.size, totalElements: page.totalElements, totalPages: page.totalPages };
     state.orderStatuses = Array.isArray(statuses) ? statuses : [];
   }
-  if (!state.orderStatuses.length) { container.innerHTML=`<section class="card card-pad">${empty('Order statuses unavailable','The backend did not return valid order statuses.')}</section>`; return; }
-  container.innerHTML = `<section class="card"><div class="card-header"><div><h3>All system orders</h3><p>Paginated data, protected receipts, and backend-approved transitions.</p></div></div>${state.adminOrders.length ? `<div class="table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Order status</th><th>Payment</th><th>Total</th><th>Actions</th></tr></thead><tbody>${state.adminOrders.map((order) => {
+  if (!state.orderStatuses.length) { container.innerHTML=`<section class="card card-pad">${empty('Order statuses unavailable','No order status options are currently available.')}</section>`; return; }
+  container.innerHTML = `<section class="card"><div class="card-header"><div><h3>All orders</h3><p>Review purchases, payment receipts, and available status updates.</p></div></div>${state.adminOrders.length ? `<div class="table-wrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Order status</th><th>Payment</th><th>Total</th><th>Actions</th></tr></thead><tbody>${state.adminOrders.map((order) => {
     const isQr=canonicalPaymentMethodName(order.paymentMethod)==='QR_CODE'; const currentStatus=normalizeName(order.status); const currentPayment=normalizeName(order.paymentStatus); const allowed=new Set((order.allowedNextStatuses||[]).map(normalizeName)); const statuses=state.orderStatuses.filter((status)=>normalizeName(status.statusName)===currentStatus||allowed.has(normalizeName(status.statusName))); const canChange=statuses.some((status)=>normalizeName(status.statusName)!==currentStatus); const canChoose=isQr&&!['PAID','FAILED'].includes(currentPayment); const canVerify=canChoose&&currentStatus==='PENDING'&&currentPayment==='PENDING_VERIFICATION'&&order.hasReceipt;
     return `<tr data-testid="admin-order-${order.orderId}"><td><strong>${escapeHtml(order.orderCode)}</strong><div class="help">#${order.orderId} · ${dateTime(order.createdAt)}</div><div class="help">Voucher: ${escapeHtml(order.voucherCode||'None')}</div></td><td>${escapeHtml(order.receiverName)}<div class="help">${escapeHtml(order.receiverPhone)}</div></td><td>${statusBadge(order.status,'Current')}<select class="select" style="margin-top:7px;min-width:180px" id="status-${order.orderId}" ${canChange?'':'disabled'}>${statuses.map((status)=>`<option value="${status.statusId}" ${normalizeName(status.statusName)===currentStatus?'selected':''}>${escapeHtml(status.statusName)}</option>`).join('')}</select><div class="help">${canChange?`Allowed next: ${escapeHtml([...allowed].join(', '))}`:'Terminal status'}</div></td><td>${statusBadge(order.paymentStatus,'Current')}<div class="help">${escapeHtml(canonicalPaymentMethodName(order.paymentMethod))}</div>${isQr?`<select class="select" style="margin-top:7px;min-width:180px" id="payment-${order.orderId}" ${canChoose?'':'disabled'}><option value="">Choose verification result</option><option value="PAID">PAID</option><option value="FAILED">FAILED</option></select><div class="help">${order.hasReceipt?`Uploaded: ${dateTime(order.receiptUploadedAt)}${order.paymentVerifiedAt?` · Verified: ${dateTime(order.paymentVerifiedAt)}`:''}`:'Receipt required before verification.'}</div>`:'<div class="help">COD is paid when delivered.</div>'}</td><td>${money(order.total)}</td><td><div class="table-actions"><button class="btn btn-secondary btn-sm" data-update-status="${order.orderId}" ${canChange?'':'disabled'}>Update status</button>${isQr?`<button class="btn btn-secondary btn-sm" data-admin-view-payment-qr="${order.orderId}">View Payment QR</button>`:''}${isQr&&order.hasReceipt?`<button class="btn btn-secondary btn-sm" data-admin-view-receipt="${order.orderId}">View Receipt</button>`:''}${isQr?`<button class="btn btn-success btn-sm" data-update-payment="${order.orderId}" ${canVerify?'':'disabled'}>Verify payment</button>`:''}</div></td></tr>`;
-  }).join('')}</tbody></table></div>`:empty('No system orders','Create an order using a customer account.')}</section>${paginationMarkup(state.adminOrdersPage,'admin-orders')}`;
+  }).join('')}</tbody></table></div>`:empty('No orders','Customer orders will appear here.')}</section>${paginationMarkup(state.adminOrdersPage,'admin-orders')}`;
   bindPagination(container,'admin-orders',state.adminOrdersPage,async(page)=>{state.adminOrdersPage.page=page;state.adminOrders=[];await renderAdminOrders(container,true);});
   container.querySelectorAll('[data-admin-view-payment-qr]').forEach((button)=>button.addEventListener('click',()=>openConfiguredPaymentQrModal({orderId:Number(button.dataset.adminViewPaymentQr),adminView:true,title:'Order-specific payment QR'})));
   container.querySelectorAll('[data-admin-view-receipt]').forEach((button)=>button.addEventListener('click',()=>openReceiptModal(Number(button.dataset.adminViewReceipt),true)));
@@ -1686,61 +1882,13 @@ async function renderAdminOrders(container, force = false) {
   container.querySelectorAll('[data-update-payment]').forEach((button)=>button.addEventListener('click',async()=>{const orderId=Number(button.dataset.updatePayment);const order=state.adminOrders.find((x)=>Number(x.orderId)===orderId);if(!order?.hasReceipt)return toast('Reviewable receipt is required.','error');if(normalizeName(order.status)!=='PENDING'||normalizeName(order.paymentStatus)!=='PENDING_VERIFICATION')return toast('Payment can only be verified for a PENDING order with PENDING_VERIFICATION payment.','error');const paymentStatus=document.querySelector(`#payment-${orderId}`).value;if(!['PAID','FAILED'].includes(paymentStatus))return toast('Choose PAID or FAILED.','error');if(!confirm(`Mark payment for ${order.orderCode} as ${paymentStatus}?`))return;setBusy(button,true,'Updating...');try{await api.verifyPayment(orderId,paymentStatus);toast(paymentStatus==='PAID'?'Payment verified successfully.':'Payment marked as failed.');state.adminOrders=[];renderCurrentView();}catch(error){if(!error.authExpired&&!error.cancelled)toast(error.message,'error');setBusy(button,false);}}));
 }
 
-function renderTestLab(container) {
-  const cases = isAdmin() ? adminTestCases() : customerTestCases();
-  container.innerHTML = `<div class="test-grid"><section class="card card-pad"><h3 style="margin-top:0">Executable workflow checks</h3><p class="help">Read-only checks run immediately. Tests marked destructive require confirmation and operate on real database records.</p>${cases.map((test)=>`<div class="test-case"><h4>${escapeHtml(test.id)} — ${escapeHtml(test.title)}</h4><p>${escapeHtml(test.description)}</p>${test.file?`<input class="input" type="file" id="file-${test.id}" accept="image/jpeg,image/png,.jpg,.jpeg,.png" />`:''}<button class="btn btn-secondary btn-sm" data-run-test="${test.id}">Run test</button><div class="test-result" id="result-${test.id}"></div></div>`).join('')}</section><section class="api-console"><div class="api-console-toolbar"><strong>API evidence log ${isApiLogEnabled()?'':'(disabled in production)'}</strong><button class="btn btn-ghost btn-sm" id="clear-log">Clear</button></div><div class="api-log" id="api-log">${apiLogMarkup()}</div></section></div>`;
-  document.querySelector('#clear-log')?.addEventListener('click',()=>{state.apiLogs=[];document.querySelector('#api-log').innerHTML=apiLogMarkup();});
-  container.querySelectorAll('[data-run-test]').forEach((button)=>button.addEventListener('click',async()=>{const test=cases.find((item)=>item.id===button.dataset.runTest);const result=document.querySelector(`#result-${test.id}`);if(test.destructive&&!confirm(`${test.title} changes real backend data. Continue?`))return;setBusy(button,true,'Running...');try{const file=test.file?document.querySelector(`#file-${test.id}`)?.files?.[0]:null;const message=await test.run(file);result.style.color='var(--green)';result.textContent=`PASS — ${message}`;}catch(error){result.style.color='var(--red)';result.textContent=`FAIL — ${error.message}`;}finally{setBusy(button,false);}}));
-}
-
-function customerTestCases() {
-  return [
-    { id:'TC-PUB-01',title:'Paginated active products',description:'Loads active products and independent category reference data.',run:async()=>{const [p,c]=await Promise.all([api.productsPage({page:0,size:5}),api.categories()]);if(!Array.isArray(p.content)||!Array.isArray(c))throw new Error('Invalid paged/category contract');return `${p.totalElements} product(s), ${c.length} category(s)`;}},
-    { id:'TC-CART-CRUD',title:'Add, update, and remove cart item',description:'Uses an ACTIVE product that is not already in the cart, then removes only the temporary test item.',destructive:true,run:async()=>{const [p,before]=await Promise.all([api.productsPage({page:0,size:100}),api.cart()]);const existingIds=new Set((before.items||[]).map((x)=>Number(x.productId)));const product=p.content.find((x)=>Number(x.stock)>=2&&!existingIds.has(Number(x.productId)));if(!product)throw new Error('No unused product with stock >= 2');await api.addCartItem(product.productId,1);await api.updateCartItem(product.productId,2);const cart=await api.cart();const item=cart.items.find((x)=>Number(x.productId)===Number(product.productId));if(!item||Number(item.quantity)!==2)throw new Error('Update did not persist');await api.removeCartItem(item.cartItemId);state.cart=null;return `Add/update/remove passed for ${product.productName}`;}},
-    { id:'TC-VOUCHER-01',title:'Voucher price preview',description:'Enter a voucher code when prompted; blank tests checkout preview without a voucher.',run:async()=>{const code=prompt('Voucher code (leave blank for no voucher):','')||'';const preview=await api.previewOrder(code.trim());if(!Array.isArray(preview.items))throw new Error('Preview items missing');return `Total ${money(preview.total)}`;}},
-    { id:'TC-CHECKOUT-COD',title:'Create COD checkout',description:'Creates a real COD order from the current cart and first saved address using an idempotency key.',destructive:true,run:async()=>{const [cart,addresses,methods]=await Promise.all([api.cart(),api.addresses(),api.paymentMethods()]);if(!cart.items?.length)throw new Error('Cart is empty');if(!addresses.length)throw new Error('No saved address');const cod=methods.find((x)=>canonicalPaymentMethodName(x.methodName)==='COD');if(!cod)throw new Error('COD missing');const order=await api.checkout({addressId:addresses[0].addressId,manualAddress:null,paymentMethodId:cod.paymentMethodId,voucherCode:null,note:'Automated Test Lab COD checkout'},createIdempotencyKey());state.cart=null;state.orders=[];return `Created ${order.orderCode}`;}},
-    { id:'TC-CHECKOUT-QR',title:'Create QR checkout',description:'Creates a real QR order from the current cart and first saved address using the backend payment-method ID and idempotency key.',destructive:true,run:async()=>{const [cart,addresses,methods]=await Promise.all([api.cart(),api.addresses(),api.paymentMethods()]);if(!cart.items?.length)throw new Error('Cart is empty');if(!addresses.length)throw new Error('No saved address');const qr=methods.find((x)=>canonicalPaymentMethodName(x.methodName)==='QR_CODE');if(!qr)throw new Error('QR_CODE missing');const order=await api.checkout({addressId:addresses[0].addressId,manualAddress:null,paymentMethodId:qr.paymentMethodId,voucherCode:null,note:'Automated Test Lab QR checkout'},createIdempotencyKey());state.cart=null;state.orders=[];return `Created QR order ${order.orderCode}`;}},
-    { id:'TC-RECEIPT-UPLOAD',title:'Upload QR receipt',description:'Select a JPG/PNG. Uploads it to the first QR order in AWAITING_PAYMENT or FAILED.',destructive:true,file:true,run:async(file)=>{const error=validateImageFile(file,'Receipt');if(error)throw new Error(error);const page=await api.ordersPage({page:0,size:100});const order=page.content.find((x)=>canonicalPaymentMethodName(x.paymentMethod)==='QR_CODE'&&['AWAITING_PAYMENT','FAILED'].includes(normalizeName(x.paymentStatus)));if(!order)throw new Error('No eligible QR order');await api.uploadQr(order.orderId,file);state.orders=[];return `Uploaded receipt for ${order.orderCode}`;}},
-    { id:'TC-ORD-01',title:'Paginated order items',description:'Verifies each returned order contains an items array and protected receipt metadata.',run:async()=>{const page=await api.ordersPage({page:0,size:10});const invalid=page.content.find((x)=>!Array.isArray(x.items)||!('hasReceipt' in x));if(invalid)throw new Error('Order contract incomplete');return `${page.totalElements} order(s)`;}},
-    { id:'TC-SEC-01',title:'Customer denied admin orders',description:'Admin endpoint must reject a CUSTOMER token.',run:async()=>{try{await api.adminOrdersPage({page:0,size:1});}catch(error){if([401,403].includes(error.status))return `Rejected HTTP ${error.status}`;throw error;}throw new Error('Customer accessed Admin orders');}}
-  ];
-}
-
-function adminTestCases() {
-  return [
-    {id:'TC-ADM-PAGE',title:'Paginated Admin orders',description:'Loads one page and verifies page metadata.',run:async()=>{const page=await api.adminOrdersPage({page:0,size:10});if(!Array.isArray(page.content)||typeof page.totalElements!=='number')throw new Error('Invalid page contract');return `${page.totalElements} order(s)`;}},
-    {id:'TC-VERIFY-PAYMENT',title:'Verify pending QR payment',description:'Marks the first eligible PENDING_VERIFICATION receipt as PAID.',destructive:true,run:async()=>{const page=await api.adminOrdersPage({page:0,size:100});const order=page.content.find((x)=>normalizeName(x.status)==='PENDING'&&normalizeName(x.paymentStatus)==='PENDING_VERIFICATION'&&x.hasReceipt);if(!order)throw new Error('No eligible payment');await api.verifyPayment(order.orderId,'PAID');state.adminOrders=[];return `Verified ${order.orderCode}`;}},
-    {id:'TC-ORDER-STATUS',title:'Apply allowed order transition',description:'Selects a backend-allowed transition that also satisfies QR payment rules, then sends the backend status ID.',destructive:true,run:async()=>{const [page,statuses]=await Promise.all([api.adminOrdersPage({page:0,size:100}),api.orderStatuses()]);let choice=null;for(const order of page.content){const allowed=(order.allowedNextStatuses||[]).map(normalizeName);const method=canonicalPaymentMethodName(order.paymentMethod);const payment=normalizeName(order.paymentStatus);const preferred=allowed.find((next)=>next!=='PROCESSING'||method!=='QR_CODE'||payment==='PAID');if(preferred){choice={order,next:preferred};break;}}if(!choice)throw new Error('No order has a currently valid transition');const status=statuses.find((x)=>normalizeName(x.statusName)===choice.next);if(!status)throw new Error(`Status ID missing for ${choice.next}`);await api.updateOrderStatus(choice.order.orderId,status.statusId);state.adminOrders=[];return `${choice.order.orderCode}: ${choice.order.status} → ${choice.next}`;}},
-    {id:'TC-RECEIPT-PROTECTED',title:'Protected receipt access',description:'Loads the first available receipt through the authenticated Admin endpoint.',run:async()=>{const page=await api.adminOrdersPage({page:0,size:100});const order=page.content.find((x)=>x.hasReceipt);if(!order)throw new Error('No receipt available');const blob=await api.adminReceipt(order.orderId);if(!blob.size)throw new Error('Empty receipt');return `${blob.size} bytes for ${order.orderCode}`;}},
-    {id:'TC-REF-02',title:'Reference data IDs',description:'Loads categories, payment methods, and order statuses from backend APIs.',run:async()=>{const [c,p,s]=await Promise.all([api.categories(),api.paymentMethods(),api.orderStatuses()]);if(!c.length||!p.length||!s.length)throw new Error('Reference data missing');return `${c.length} categories, ${p.length} methods, ${s.length} statuses`;}},
-    {id:'TC-SEC-02',title:'Admin denied customer cart',description:'Customer cart endpoint must reject an ADMIN token.',run:async()=>{try{await api.cart();}catch(error){if([401,403].includes(error.status))return `Rejected HTTP ${error.status}`;throw error;}throw new Error('Admin accessed customer cart');}}
-  ];
-}
-
-function apiLogMarkup() {
-  if (!state.apiLogs.length) return '<div class="empty" style="color:#9fb0c7"><strong style="color:white">No API calls captured</strong>Use the application or run a smoke test.</div>';
-  return state.apiLogs.map((log) => `<div class="log-item"><div class="log-head"><span class="log-method">${escapeHtml(log.method)}</span><span class="log-status ${log.ok ? 'ok' : 'fail'}">${log.status || 'NETWORK'}</span><span>${log.durationMs} ms</span><span class="log-path">${escapeHtml(log.path)}</span></div><details><summary>Request / response</summary><pre>${escapeHtml(JSON.stringify({ request: log.requestBody, response: log.response }, null, 2))}</pre></details></div>`).join('');
-}
-
-function renderSettings(container) {
-  const config = getConfig();
-  const endpointLabel = config.apiBaseUrl || 'Same origin (/api through the Vite proxy)';
-  container.innerHTML = `<div class="grid grid-2"><section class="card card-pad"><h3 style="margin-top:0">Secure API configuration</h3><div class="test-case"><h4>API base URL</h4><p><code>${escapeHtml(endpointLabel)}</code></p><p>The destination is fixed at build time through <code>VITE_API_BASE_URL</code>. No user role can redirect JWT requests from this page.</p></div><div class="test-case"><h4>API evidence logging</h4><p>${isApiLogEnabled()?'Enabled for this test/development build. Personal data is redacted.':'Disabled in this production build.'}</p></div><p class="help">There is no browser-stored default category ID. Product forms require a category returned by <code>GET /api/reference/categories</code>.</p></section><section class="card card-pad"><h3 style="margin-top:0">Runtime protections</h3><div class="test-case"><h4>Session storage</h4><p>JWT is stored in sessionStorage, validated using its exp claim on startup, and removed with all user state after logout or HTTP 401.</p></div><div class="test-case"><h4>Request lifecycle</h4><p>Every request has a timeout and is cancelled when the user changes screens.</p></div><div class="test-case"><h4>Backend reference data</h4><p>Categories, payment methods, and order statuses are loaded from dedicated APIs. Database IDs are never configured manually here.</p></div></section></div>`;
-}
-
 window.addEventListener('swt-auth-expired', () => {
   const hadSession = Boolean(state.session);
   resetAuthenticatedState();
   renderAuth();
-  if (hadSession) toast('Your session expired or the token is invalid. Please log in again.', 'error', 'Session expired');
+  if (hadSession) toast('Your session has ended. Please sign in again.', 'error', 'Session ended');
 });
 
-window.addEventListener('swt-api-log', (event) => {
-  state.apiLogs.unshift(event.detail);
-  state.apiLogs = state.apiLogs.slice(0, 100);
-  const log = document.querySelector('#api-log');
-  if (log) log.innerHTML = apiLogMarkup();
-});
 
 renderAuth();
 if (state.session) renderShell();

@@ -13,7 +13,7 @@
   "devDependencies": {
     "vite": "^7.0.0"
   },
-  "description": "Backend-connected e-commerce frontend for SWT301 software testing.",
+  "description": "SWT301 Commerce shopping and order management application.",
   "keywords": [
     "swt301",
     "software-testing",

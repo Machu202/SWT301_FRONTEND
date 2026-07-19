@@ -53,7 +53,7 @@ export function getSession() {
 }
 
 export function saveSession(session) {
-  if (!isSessionUsable(session)) throw new Error('The backend returned a malformed or expired JWT.');
+  if (!isSessionUsable(session)) throw new Error('Your sign-in could not be completed. Please try again.');
   clearLegacyLocalStorage();
   sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
 }
@@ -89,11 +89,27 @@ function buildUrl(path) {
   return `${API_BASE_URL}${path}`;
 }
 
+const TECHNICAL_MESSAGE_PATTERN = /\b(?:backend|frontend|api|database|supabase|cloudinary|jwt|endpoint|server|environment|stack trace|sql|hibernate|spring boot|http\s*\d{3})\b/i;
+
+function neutralMessage(message, status) {
+  const text = String(message || '').trim();
+  if (status === 401) return 'Your session has ended. Please sign in again.';
+  if (status === 403) return 'You do not have permission to complete this action.';
+  if (status === 404) return 'The requested information could not be found.';
+  if (status === 409) return text && !TECHNICAL_MESSAGE_PATTERN.test(text) ? text : 'This information already exists or conflicts with another record.';
+  if (status >= 500) return 'This feature is temporarily unavailable. Please try again later.';
+  if (!text || TECHNICAL_MESSAGE_PATTERN.test(text)) return 'We could not complete this action. Please try again.';
+  return text;
+}
+
 function extractErrorMessage(payload, status) {
   if (payload?.errors && typeof payload.errors === 'object') {
-    return Object.entries(payload.errors).map(([field, message]) => `${field}: ${message}`).join(' | ');
+    const validation = Object.entries(payload.errors)
+      .map(([field, message]) => `${field}: ${message}`)
+      .filter((message) => !TECHNICAL_MESSAGE_PATTERN.test(message));
+    if (validation.length) return validation.join(' | ');
   }
-  return payload?.message || payload?.error || `Request failed with HTTP ${status}`;
+  return neutralMessage(payload?.message || payload?.error, status);
 }
 
 const SENSITIVE_KEYS = [
@@ -156,7 +172,7 @@ export async function apiRequest(path, options = {}) {
   const hadStoredSession = Boolean(sessionStorage.getItem(SESSION_KEY));
   const session = getSession();
   if (hadStoredSession && !session) {
-    const error = new Error('Session expired or token is invalid.');
+    const error = new Error('Your session has ended. Please sign in again.');
     error.status = 401;
     error.authExpired = true;
     throw error;
@@ -215,8 +231,8 @@ export async function apiRequest(path, options = {}) {
     if (error?.name === 'AbortError' || error?.name === 'TimeoutError' || signal.aborted) {
       const reasonName = timeoutController.signal.aborted ? 'TimeoutError' : 'AbortError';
       const aborted = new Error(reasonName === 'TimeoutError'
-        ? `The request exceeded the ${Math.round(timeoutMs / 1000)} second timeout.`
-        : 'The request was cancelled because the screen changed.');
+        ? 'This action is taking too long. Please try again.'
+        : 'This action was stopped because you moved to another screen.');
       aborted.name = reasonName;
       aborted.cancelled = reasonName === 'AbortError';
       aborted.status = 0;
@@ -229,7 +245,7 @@ export async function apiRequest(path, options = {}) {
     if (!response) {
       emitApiLog({ timestamp: new Date().toISOString(), method, path, requestBody, status: 0, ok: false,
         durationMs: Math.round(performance.now() - startedAt), response: { message: error.message } });
-      const networkError = new Error('Cannot reach the backend or the connection was interrupted.');
+      const networkError = new Error('This feature is temporarily unavailable. Check your connection and try again.');
       networkError.cause = error;
       networkError.status = 0;
       throw networkError;
